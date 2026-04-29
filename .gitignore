@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+.DS_Store
+
+# Local outputs
+eval/
+output/
+data/
+templates/
+extracted_templates/
+results/
+*.log
