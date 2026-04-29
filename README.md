@@ -175,18 +175,27 @@ canonical version.
 
 ### SecurityLogs Dataset
 
-The benchmark targets five log types from the SecurityLogs corpus: `audit`,
-`cron`, `dhcp`, `puppet`, `sshd`. The repository ships only the query JSONs
-(under `queries/`) and ground-truth builders. The raw log files are not
-included; place them at `data/logs/<type>` (or set `LOG_DIR` to override the
-directory).
+The benchmark targets five log types from the SecurityLogs corpus.
+The raw logs ship gzipped under `data/logs/`. Decompress them once after
+cloning:
+
+```bash
+gunzip data/logs/*.gz
+```
+
+This produces `data/logs/{audit,cron,dhcp,puppet,sshd}` (uncompressed), which
+is where the default `LOG_FILES` paths in `experiments.py` point. Set
+`LOG_DIR` if you want the logs elsewhere.
 
 **Included Log Types:**
-- Audit logs
-- SSH Server logs
-- DHCP Client logs
-- CRON logs
-- Puppet logs
+
+| Type | Lines | Source |
+|------|-------|--------|
+| Audit  | Linux audit subsystem  | SecurityLogs |
+| SSH    | OpenSSH server         | SecurityLogs |
+| DHCP   | dhclient / dhcpd       | SecurityLogs |
+| CRON   | cron + PAM session     | SecurityLogs |
+| Puppet | Puppet agent runs      | SecurityLogs |
 
 ### Human Baseline
 
