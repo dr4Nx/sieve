@@ -1,82 +1,105 @@
-# Parser-free log querying
+# Parser-Free Log Querying
+> LLM-generated code as a substitute for log parsers in security log analysis
 
-This repository accompanies a study of LLM-generated code as a substitute for
-log parsers in security log analysis. Given a natural-language query and a raw
-log file, an LLM (Gemini) writes a Python or shell filter that reads the file
-and returns the matching lines or extracted fields. The framework scores the
-filter against rule-based ground truth.
+## Table of Contents
 
-## Layout
+- [Overview](#overview)
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Installation](#installation)
+  - [LLM API Configuration](#llm-api-configuration)
+  - [Usage](#usage)
+- [Reproducing Experiments](#reproducing-experiments)
+- [Building Queries from Scratch](#building-queries-from-scratch)
+- [Data](#data)
 
-```
-log_query/         LLM client, prompt construction, sandboxing, templaters
-evaluation/        Evaluator that runs queries, computes F1, writes reports
-ground_truth/      Per-log-type parsers and code that builds the query JSONs
-queries/           Pre-built query benchmarks (one JSON per dataset)
-human_baselines/   Naive grep/Python scripts (the human comparison point)
-log_parser.py      Single-query CLI wrapper around log_query
-evaluate.py        Multi-query evaluator wrapper around evaluation
-experiments.py     Experiment orchestrator (template-compare, prompt-ablation, ...)
-```
+---
 
-## Setup
+## Overview
 
-Python 3.10 or newer. Install deps:
+Given a natural-language query and a raw log file, an LLM (Gemini) writes a
+Python or shell filter that reads the file and returns the matching lines or
+extracted fields. The framework executes the filter in a sandboxed subprocess
+and scores the output against rule-based ground truth.
+
+**Repository layout:**
+
+| Path | Contents |
+|------|----------|
+| `log_query/` | LLM client, prompt construction, sandboxing, templaters |
+| `evaluation/` | Multi-query runner, F1 scoring, report writers |
+| `ground_truth/` | Per-log-type rule-based parsers and query builders |
+| `queries/` | Pre-built query benchmarks (10 JSONs, larger ones gzipped) |
+| `human_baselines/` | Naive grep / Python scripts used as the human comparison |
+| `log_parser.py` | Single-query CLI |
+| `evaluate.py` | Multi-query evaluator |
+| `experiments.py` | Experiment orchestrator |
+
+## Getting Started
+
+### Prerequisites
+
+- **Python**: 3.10 or higher
+- **API Access**: At least one Gemini API key, or Vertex AI access
+
+### Installation
 
 ```bash
+# Create virtual environment
+python3 -m venv env
+source env/bin/activate
+
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-Set at least one Gemini API key:
+### LLM API Configuration
+
+#### Gemini API (default)
 
 ```bash
-export GEMINI_API_KEY=...           # required for the standalone Gemini API
-export GEMINI_API_KEY_2=...         # optional; up to three keys are rotated
-export GEMINI_API_KEY_3=...
+export GEMINI_API_KEY=YOUR_API_KEY
+export GEMINI_API_KEY_2=YOUR_API_KEY_2  # optional
+export GEMINI_API_KEY_3=YOUR_API_KEY_3  # optional
 ```
 
-Alternatively, use Vertex AI:
+The evaluator rotates round-robin across all keys present and skips any key
+that returns billing-exhausted at startup.
+
+- **Usage**: Specify the model with `--model MODEL`
+- **Supported Models**: Any Gemini generative model (default: `gemini-2.5-flash`)
+
+#### Vertex AI
 
 ```bash
 gcloud auth application-default login
 export USE_VERTEX_AI=1
-export VERTEX_PROJECT=<gcp-project>
+export VERTEX_PROJECT=YOUR_GCP_PROJECT
 ```
 
-## Datasets
+Add `--vertex-ai` to single-query commands; `experiments.py` reads
+`USE_VERTEX_AI` from the environment.
 
-The benchmark targets five log types from the Loghub-derived SecurityLogs
-corpus: `audit`, `cron`, `dhcp`, `puppet`, `sshd`. The repository ships only
-the query JSONs (under `queries/`) and ground-truth builders. The raw log
-files are not included.
+### Usage
 
-Place the raw files at:
-
-```
-data/logs/audit
-data/logs/cron
-data/logs/dhcp
-data/logs/puppet
-data/logs/sshd
-```
-
-(or set `LOG_DIR` to override the directory).
-
-Larger query JSONs are stored gzipped (`*.json.gz`) and are loaded
-transparently by `evaluate.py`. Pass either path; the loader falls back to
-the `.gz` form if the plain `.json` is missing. To inspect them in a text
-editor, run `gunzip -k queries/<file>.json.gz`.
-
-## Single query
+#### Single Query
 
 ```bash
 python log_parser.py "Find DHCPACK lines" data/logs/dhcp --language python
 ```
 
-Add `--templates <path>` for hand-written templates, or `--templater frequency`
-or `--templater drain3` to auto-generate templates from the log file.
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--language` | `bash` | `bash` or `python` for the generated filter |
+| `--model` | `gemini-2.5-flash` | Gemini model ID |
+| `--templates PATH` | - | Hand-written template file |
+| `--templater` | - | `frequency` or `drain3` to auto-generate templates |
+| `--sample-size` | `250` | Reservoir sample size passed in the prompt |
+| `--sample-seed N` | - | Make sampling deterministic |
+| `--max-retries` | `4` | Retries with error feedback on failure |
+| `--validate` | - | Run the generated filter on the sample first |
 
-## Evaluating a benchmark
+#### Evaluation
 
 ```bash
 python evaluate.py queries/dhcp_simple.json data/logs/dhcp \
@@ -86,26 +109,42 @@ python evaluate.py queries/dhcp_simple.json data/logs/dhcp \
     --max-workers 8
 ```
 
-Reports are written under `eval/<dataset>/<run>/` with per-query F1, the
-generated code, and the matched lines.
+Reports land under `eval/<dataset>/<run>/` with per-query F1, generated code,
+and matched lines.
 
-## Experiment orchestrator
+Larger query JSONs (`audit_simple`, `dhcp_simple`, `dhcp_complex`,
+`puppet_simple`, `sshd_simple`) are stored gzipped. The loader transparently
+falls back to `<file>.json.gz` when `<file>.json` is missing; `gunzip -k` if
+you want to read them in an editor.
+
+## Reproducing Experiments
 
 `experiments.py` wraps `evaluate.py` for the experiments reported in the
-paper. Available experiments:
+paper.
 
-| name                  | what it does                                              |
-| --------------------- | --------------------------------------------------------- |
-| `template-compare`    | Compare context strategies (manual, drain3, frequency, random, none) |
-| `prompt-ablation`     | Drop each prompt component and measure F1                 |
-| `model-compare`       | Compare Gemini models on a fixed strategy                 |
-| `language-compare`    | Bash vs Python for the generated filter                   |
-| `sample-size`         | Sweep the number of sample lines passed in context        |
-| `consistency`         | Run each query N times to measure variance                |
-| `human-baseline`      | Compare LLM filters against naive grep/Python scripts     |
-| `few-shot`            | Add worked query/code examples to the prompt              |
-| `retry-analysis`      | Track how often retries flip a wrong answer to a correct one |
-| `cross-log-transfer`  | Use templates from a different log type                   |
+| Experiment | Description |
+|-----------|-------------|
+| `template-compare` | Compare context strategies: matryoshka (manual), drain3, frequency, random-only, none |
+| `prompt-ablation` | Drop one prompt component at a time and measure F1 |
+| `model-compare` | Compare Gemini models on a fixed strategy |
+| `language-compare` | Bash vs Python for the generated filter |
+| `sample-size` | Sweep the number of context sample lines |
+| `consistency` | Run each query N times to measure variance |
+| `human-baseline` | Compare LLM filters against `human_baselines/` |
+| `few-shot` | Add worked query/code examples to the prompt |
+| `retry-analysis` | Track how often retries flip wrong answers to correct ones |
+| `cross-log-transfer` | Use templates from a different log type |
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--experiment` | - | **Required** — experiment name from the table above |
+| `--datasets` | `audit_simple puppet_simple` | One or more of `<logtype>_<simple\|complex>` |
+| `--model` | `gemini-2.5-flash` | Single model for non-comparison experiments |
+| `--models` | all | Override model list for `model-compare` / `full-matrix` |
+| `--language` | `python` | `bash` or `python` |
+| `--sample-size` | `50` | Reservoir sample size |
+| `--max-workers` | `1` | Parallel workers per eval run |
+| `--runs` | `5` | Repeats for `consistency` |
 
 Example:
 
@@ -115,9 +154,9 @@ python experiments.py --experiment template-compare \
     --max-workers 20
 ```
 
-Outputs land in `eval/experiments/<name>/<timestamp>/`.
+Outputs land under `eval/experiments/<name>/<timestamp>/`.
 
-## Building queries from scratch
+## Building Queries from Scratch
 
 Each `ground_truth/<logtype>/build_queries.py` regenerates the dataset's
 JSON from the raw log file and a rule-based parser:
@@ -132,12 +171,30 @@ python -m ground_truth.sshd.build_queries   --log-file data/logs/sshd
 DHCP queries are not regenerated from a parser; the JSON in `queries/` is the
 canonical version.
 
-## Reproducing the human baseline
+## Data
 
-See `human_baselines/README.md`.
+### SecurityLogs Dataset
 
-## Notes on determinism
+The benchmark targets five log types from the SecurityLogs corpus: `audit`,
+`cron`, `dhcp`, `puppet`, `sshd`. The repository ships only the query JSONs
+(under `queries/`) and ground-truth builders. The raw log files are not
+included; place them at `data/logs/<type>` (or set `LOG_DIR` to override the
+directory).
 
-`--sample-seed <int>` makes the reservoir sampling deterministic. Variance
-across runs then reflects only model nondeterminism; in our experiments we
-report the mean and std across `N` repeats.
+**Included Log Types:**
+- Audit logs
+- SSH Server logs
+- DHCP Client logs
+- CRON logs
+- Puppet logs
+
+### Human Baseline
+
+`human_baselines/` contains 93 naive grep / Python scripts representing what
+a competent sysadmin would write in a few minutes as a first attempt. See
+`human_baselines/README.md` for layout and conventions.
+
+### Determinism
+
+`--sample-seed <int>` makes reservoir sampling deterministic. Variance across
+repeated runs then reflects only model nondeterminism.
