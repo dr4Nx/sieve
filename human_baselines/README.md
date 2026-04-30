@@ -1,8 +1,8 @@
 # Human baseline scripts
 
-Naive grep/Python scripts that approximate what a competent sysadmin would write
-in a few minutes as a first attempt. We use them as the comparison point for
-LLM-generated filters in the `human-baseline` experiment.
+Hand-written grep/Python reference scripts representing a typical sysadmin
+approach to each query. We use them as the comparison point for LLM-generated
+filters in the `human-baseline` experiment.
 
 ## Layout
 
@@ -52,7 +52,7 @@ The runner writes one report per dataset under
 
 ## What the scripts do not handle
 
-The baseline is meant to be naive on purpose. The scripts skip:
+These reference scripts do not attempt to handle:
 
 - Word boundaries (`grep "3.0.1"` matches `3.0.10`).
 - Year boundaries in syslog-style timestamps.
@@ -61,5 +61,5 @@ The baseline is meant to be naive on purpose. The scripts skip:
 - Multi-permission audit denials counted as one event.
 - Numeric output formatting (e.g. float precision).
 
-For some DHCP queries (`vague_*`, `numerical_*`) there is no obvious naive grep
-that would work; the corresponding scripts score zero by design.
+For some DHCP queries (`vague_*`, `numerical_*`) there is no straightforward
+grep-style approach; the corresponding scripts return no matches.

@@ -1,7 +1,6 @@
 # Query: For each command, find the max gap in seconds between consecutive executions.
 import sys, re
 from collections import defaultdict
-# Naive: grep CMD lines, use string-based time sort, skip microseconds
 cmd_times = defaultdict(list)
 for line in open(sys.argv[1]):
     if "CMD" not in line:

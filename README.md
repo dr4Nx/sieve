@@ -30,7 +30,7 @@ and scores the output against rule-based ground truth.
 | `evaluation/` | Multi-query runner, F1 scoring, report writers |
 | `ground_truth/` | Per-log-type rule-based parsers and query builders |
 | `queries/` | Pre-built query benchmarks (10 JSONs, larger ones gzipped) |
-| `human_baselines/` | Naive grep / Python scripts used as the human comparison |
+| `human_baselines/` | Hand-written grep / Python scripts used as the human comparison |
 | `log_parser.py` | Single-query CLI |
 | `evaluate.py` | Multi-query evaluator |
 | `experiments.py` | Experiment orchestrator |
@@ -209,8 +209,8 @@ is where the default `LOG_FILES` paths in `experiments.py` point. Set
 
 ### Human Baseline
 
-`human_baselines/` contains 93 naive grep / Python scripts representing what
-a competent sysadmin would write in a few minutes as a first attempt. See
+`human_baselines/` contains 93 hand-written grep / Python reference scripts
+representing a typical sysadmin approach to each query. See
 `human_baselines/README.md` for layout and conventions.
 
 ### Determinism
