@@ -98,8 +98,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--vertex-ai", action="store_true", help="Use Vertex AI instead of standalone Gemini API")
     parser.add_argument(
         "--project",
-        default=os.environ.get("VERTEX_PROJECT"),
-        help="GCP project for Vertex AI (env: VERTEX_PROJECT)",
+        default="reds-evan-project",
+        help="GCP project for Vertex AI (default: reds-evan-project)",
     )
     parser.add_argument(
         "--location",
@@ -225,6 +225,30 @@ def _build_system_instruction(language: str) -> str:
     )
 
 
+def _maybe_unescape(text: str, language: str) -> str:
+    """If the code came back with literal \\n / \\t escapes (over-escaped JSON),
+    decode them. Returns text unchanged when no escapes are present or the
+    decode would corrupt the source."""
+    if "\\n" not in text and "\\t" not in text:
+        return text
+    try:
+        decoded = bytes(text, "utf-8").decode("unicode_escape")
+    except Exception:
+        return text
+    if language == "python":
+        import ast
+        try:
+            ast.parse(text)
+            return text  # Original parses fine; don't second-guess.
+        except SyntaxError:
+            try:
+                ast.parse(decoded)
+                return decoded
+            except SyntaxError:
+                return text
+    return decoded
+
+
 def _parse_output_contract(payload: str, language: str, log: Logger) -> str:
     text = payload.strip()
     if not text:
@@ -238,11 +262,11 @@ def _parse_output_contract(payload: str, language: str, log: Logger) -> str:
             if language == "python":
                 code = obj.get("code")
                 if isinstance(code, str) and code.strip():
-                    return code.strip()
+                    return _maybe_unescape(code.strip(), language)
             else:
                 cmd = obj.get("command")
                 if isinstance(cmd, str) and cmd.strip():
-                    return cmd.strip()
+                    return _maybe_unescape(cmd.strip(), language)
             log.warn("Output JSON missing expected field; falling back to raw text.")
             return text
         key = "code" if language == "python" else "command"
@@ -490,7 +514,7 @@ def _run_single_query_impl(
                     break
                 # Exponential backoff: 5, 10, 20, 40, 80, 160 seconds
                 wait = 5 * (2 ** attempt)
-                log.warn(f"{prefix}Transient API error (attempt {attempt + 1}/6): {err_str[:120]}; backing off {wait}s")
+                log.warn(f"{prefix}Transient API error (attempt {attempt + 1}/6): {err_str[:120]} — backing off {wait}s")
                 _t_mod.sleep(wait)
         if api_error is not None or response is None:
             error_msg = f"Gemini API call failed after retries: {api_error}"
