@@ -13,6 +13,7 @@ output/
 templates/
 extracted_templates/
 results/
+!results/matryoshka_comparison/
 *.log
 
 # Decompressed log files (shipped as .gz in data/logs/)
