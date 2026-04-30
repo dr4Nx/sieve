@@ -1,13 +1,24 @@
-"""Gemini client construction for standalone and Vertex AI routes."""
+"""LLM client construction (Gemini standalone, Vertex AI, OpenAI)."""
 
 import os
 import sys
 from typing import Tuple
 
 from .logging_utils import Logger
+from .openai_client import build_openai_client, looks_like_openai_model_name
 
 
 def build_gemini_client(args, log: Logger) -> Tuple[object, object]:
+    """Dispatch to the right backend based on the requested model.
+
+    Kept under the original name so existing call sites continue to work.
+    """
+    if looks_like_openai_model_name(getattr(args, "model", "")):
+        return build_openai_client(args, log)
+    return _build_google_client(args, log)
+
+
+def _build_google_client(args, log: Logger) -> Tuple[object, object]:
     # Import here so the script is still importable even if lib not installed.
     try:
         from google import genai

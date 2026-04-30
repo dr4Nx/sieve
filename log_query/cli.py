@@ -177,10 +177,11 @@ def _validate_args(args: argparse.Namespace, log: Logger) -> None:
     if args.sample_size <= 0:
         log.error("--sample-size must be a positive integer.")
         sys.exit(1)
-    if not looks_like_gemini_model_name(args.model):
+    from .openai_client import looks_like_openai_model_name
+    if not (looks_like_gemini_model_name(args.model) or looks_like_openai_model_name(args.model)):
         log.error(
-            "--model must look like a Gemini model ID, for example: "
-            "gemini-2.5-flash, gemini-2.5-flash-lite, gemini-3.1-pro-preview."
+            "--model must be a Gemini model ID (e.g. gemini-2.5-flash) or an "
+            "OpenAI model ID (e.g. gpt-5.4, gpt-4o, o3)."
         )
         sys.exit(1)
     if args.vertex_ai and (not args.project or not args.location):

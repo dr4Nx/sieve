@@ -55,7 +55,11 @@ pip install -r requirements.txt
 
 ### LLM API Configuration
 
-#### Gemini API (default)
+The model is selected with `--model MODEL`. The backend is inferred from the
+name: anything starting with `gemini-` routes to Google; anything starting
+with `gpt-`, `o1`, `o3`, `o4`, or `o5` routes to OpenAI.
+
+#### Gemini API
 
 ```bash
 export GEMINI_API_KEY=YOUR_API_KEY
@@ -64,10 +68,7 @@ export GEMINI_API_KEY_3=YOUR_API_KEY_3  # optional
 ```
 
 The evaluator rotates round-robin across all keys present and skips any key
-that returns billing-exhausted at startup.
-
-- **Usage**: Specify the model with `--model MODEL`
-- **Supported Models**: Any Gemini generative model (default: `gemini-2.5-flash`)
+that returns billing-exhausted at startup. Default model: `gemini-2.5-flash`.
 
 #### Vertex AI
 
@@ -79,6 +80,15 @@ export VERTEX_PROJECT=YOUR_GCP_PROJECT
 
 Add `--vertex-ai` to single-query commands; `experiments.py` reads
 `USE_VERTEX_AI` from the environment.
+
+#### OpenAI
+
+```bash
+export OPENAI_API_KEY=YOUR_API_KEY
+```
+
+Pass any OpenAI chat-completions model with `--model`, for example
+`--model gpt-5.4`, `--model gpt-4o`, or `--model o3`.
 
 ### Usage
 

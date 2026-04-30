@@ -191,17 +191,24 @@ def _collect_api_keys(args: argparse.Namespace) -> list[str]:
         return []
     from dotenv import load_dotenv
     load_dotenv()
+    model = (getattr(args, "model", "") or "").lower()
+    is_openai = model.startswith(("gpt-", "o1", "o3", "o4", "o5"))
     candidates: list[str] = []
     explicit = getattr(args, "api_key", None)
     if explicit:
         candidates.append(explicit)
+    if is_openai:
+        for env_name in ["OPENAI_API_KEY", "OPENAI_API_KEY_2", "OPENAI_API_KEY_3"]:
+            val = os.environ.get(env_name)
+            if val and val not in candidates:
+                candidates.append(val)
+        return candidates  # OpenAI: skip Gemini liveness check
     for env_name in ["GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3"]:
         val = os.environ.get(env_name)
         if val and val not in candidates:
             candidates.append(val)
 
     # Liveness check: filter out keys that are billing-exhausted for the model
-    model = getattr(args, "model", None)
     if not model or not candidates:
         return candidates
     try:
