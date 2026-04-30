@@ -1,4 +1,4 @@
-# Evaluation report generated 20260429-122955
+# Evaluation report generated 20260426-225137
 # Source JSON: queries/dhcp_complex.json
 # Log file input: data/logs/dhcp
 # Log file resolved: data/logs/dhcp
@@ -6,8 +6,8 @@
 # Language: python
 # Sample size: 100
 # Max retries: 4
-# Timeout: 600
-# Templates: templates/dhcp_templates_20260429-122959.json
+# Timeout: 1200
+# Templates: templates/dhcp_templates_20260426-225141.json
 # Queries evaluated: 21
 
 ID: multiline_1 | type: select | query: Find transactions where time from DHCPREQUEST to DHCPACK exceeds 5 seconds. Return a list of pairs of transaction ids and duration.
@@ -15,184 +15,136 @@ ID: multiline_1 | type: select | query: Find transactions where time from DHCPRE
   requested output data type=string,float
   command: import sys
 import re
-import datetime
 import gzip
-
-def process_file(filepath):
-    # Track first seen timestamp for each transaction
-    # Keyed by (host, xid)
-    requests = {}
-    # Fallback mapping from (host, pid) -> xid
-    host_pid_to_xid = {}
-    
-    # Regex to handle standard syslog lines and embedded syslog messages
-    msg_pattern = re.compile(
-        r'(?:^|<[0-9]+>)'
-        r'([A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2})\s+'
-        r'([^:]+):\s+'
-        r'(.*?)(?=<[0-9]+>[A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2}|$)'
-    )
-    
-    opener = gzip.open if filepath.endswith('.gz') else open
-    try:
-        with opener(filepath, 'rt', encoding='utf-8', errors='ignore') as f:
-            for line in f:
-                line = line.rstrip('\n')
-                current_host = None
-                
-                for m in msg_pattern.finditer(line):
-                    date_str = m.group(1)
-                    host_proc = m.group(2).strip()
-                    text = m.group(3).strip()
-                    
-                    parts = host_proc.split()
-                    if len(parts) >= 2:
-                        host = parts[0]
-                        proc = parts[-1]
-                    else:
-                        host = None
-                        proc = parts[-1] if parts else ''
-                        
-                    # Inherit host if missing (for some embedded messages)
-                    if host:
-                        current_host = host
-                    else:
-                        host = current_host
-                        
-                    pid = None
-                    if '[' in proc and proc.endswith(']'):
-                        pid_str = proc[proc.find('[')+1:-1]
-                        if pid_str.isdigit():
-                            pid = pid_str
-                            
-                    is_req = 'DHCPREQUEST' in text
-                    is_ack = 'DHCPACK' in text
-                    
-                    if not (is_req or is_ack):
-                        continue
-                        
-                    # Normalize whitespace in date string and parse
-                    dt_str = "2000 " + re.sub(r'\s+', ' ', date_str)
-                    try:
-                        dt = datetime.datetime.strptime(dt_str, "%Y %b %d %H:%M:%S")
-                        ts = dt.timestamp()
-                    except ValueError:
-                        continue
-                        
-                    # Extract transaction ID exactly as formatted
-                    xid_match = re.search(r'xid=([^)\s]+)', text)
-                    xid = xid_match.group(1) if xid_match else None
-                    
-                    if is_req:
-                        if xid:
-                            req_key = (host, xid)
-                            if req_key not in requests:
-                                requests[req_key] = ts
-                            if host and pid:
-                                host_pid_to_xid[(host, pid)] = xid
-                    elif is_ack:
-                        ack_xid = xid
-                        if not ack_xid:
-                            # Infer transaction id unambiguously from (host, pid) if xid missing
-                            if host and pid and (host, pid) in host_pid_to_xid:
-                                ack_xid = host_pid_to_xid[(host, pid)]
-                                
-                        if ack_xid:
-                            req_key = (host, ack_xid)
-                            if req_key in requests:
-                                duration = ts - requests[req_key]
-                                if duration > 5:
-                                    print(f"{ack_xid} {duration}")
-                                # Remove the request to prevent duplicate processing
-                                del requests[req_key]
-    except Exception:
-        pass
-
-if __name__ == '__main__':
-    if len(sys.argv) > 1:
-        process_file(sys.argv[1])
-  precision=0.9879 recall=1.0000 f1=0.9939 TP=163 FP=2 FN=0 returned=165 must=163
-  may_precision=0.9879 may_recall=0.2681 may_f1=0.4217 may_TP=163 may_FP=2 may_FN=445 may=608
-  retries=1
-  input_tokens=40007 output_tokens=2458
-  elapsed_seconds=311.62
-
-ID: multiline_2 | type: select | query: Find hosts issuing >100 DHCPREQUESTs within any 30-minute rolling window. Report the times of the first and last REQUEST of the first such window with the largest number of requests for each host.
-  requested output format=host,request_count_in_30min_window,window_start,window_end
-  requested output data type=string,integer,float,float
-  command: import sys
-import re
-import time
+from datetime import datetime
 
 def process_logs():
     if len(sys.argv) < 2:
         return
     file_path = sys.argv[1]
     
-    events = []
-    pattern = re.compile(r'^([A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2})\s+(\S+).*?\bDHCPREQUEST\b')
+    header_re = re.compile(r'^([A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2})\s+(\S+)\s+([^:\[\]]+)(?:\[(\d+)\])?:\s+(.*)')
+    xid_re = re.compile(r'\(xid=(0x[0-9a-fA-F]+)\)')
     
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        for line in f:
-            m = pattern.search(line)
-            if m:
-                ts_str = m.group(1)
-                host = m.group(2)
+    req_timestamps = {}
+    pid_to_xid = {}
+    
+    open_func = gzip.open if file_path.endswith('.gz') else open
+    try:
+        with open_func(file_path, 'rt', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                match = header_re.search(line)
+                if not match:
+                    continue
+                    
+                ts_str, host, process, pid, message = match.groups()
                 
-                ts_str_normalized = re.sub(r'\s+', ' ', ts_str)
-                full_ts_str = "2000 " + ts_str_normalized
+                is_req = "DHCPREQUEST" in message
+                is_ack = "DHCPACK" in message
+                
+                if not (is_req or is_ack):
+                    continue
+                    
+                xid_match = xid_re.search(message)
+                xid = xid_match.group(1) if xid_match else None
                 
                 try:
-                    t = time.strptime(full_ts_str, "%Y %b %d %H:%M:%S")
-                    ts = float(time.mktime(t))
+                    dt = datetime.strptime(f"{ts_str} 2000", '%b %d %H:%M:%S %Y')
+                    ts = dt.timestamp()
                 except ValueError:
                     continue
                 
-                events.append({
-                    'timestamp': ts,
-                    'host': host,
-                    'event_type': 'DHCPREQUEST'
-                })
+                if xid and pid:
+                    pid_to_xid[(host, pid)] = (xid, ts)
+                    
+                if not xid and pid and (host, pid) in pid_to_xid:
+                    inferred_xid, inferred_ts = pid_to_xid[(host, pid)]
+                    if abs(ts - inferred_ts) < 300:
+                        xid = inferred_xid
+                        
+                if not xid:
+                    continue
+                    
+                if is_req:
+                    key = (host, xid)
+                    if key not in req_timestamps or (ts - req_timestamps[key]) > 300:
+                        req_timestamps[key] = ts
                 
-    host_requests = {}
-    for ev in events:
-        h = ev['host']
-        if h not in host_requests:
-            host_requests[h] = []
-        host_requests[h].append(ev['timestamp'])
+                if is_ack:
+                    key = (host, xid)
+                    if key in req_timestamps:
+                        duration = ts - req_timestamps[key]
+                        if duration > 5:
+                            print(f"{xid} {duration}")
+                        del req_timestamps[key]
+    except Exception:
+        pass
+
+if __name__ == "__main__":
+    process_logs()
+  precision=0.7975 recall=0.7975 f1=0.7975 TP=130 FP=33 FN=33 returned=163 must=163
+  may_precision=0.7975 may_recall=0.2138 may_f1=0.3372 may_TP=130 may_FP=33 may_FN=478 may=608
+  retries=0
+  input_tokens=19987 output_tokens=731
+  elapsed_seconds=192.86
+
+ID: multiline_2 | type: select | query: Find hosts issuing >100 DHCPREQUESTs within any 30-minute rolling window. Report the times of the first and last REQUEST of the first such window with the largest number of requests for each host.
+  requested output format=host,request_count_in_30min_window,window_start,window_end
+  requested output data type=string,integer,float,float
+  command: import sys
+import re
+import datetime
+import gzip
+from collections import defaultdict
+
+def main():
+    if len(sys.argv) < 2:
+        return
+    file_path = sys.argv[1]
+    
+    requests = defaultdict(list)
+    pattern = re.compile(r"^([A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2})\s+(\S+).*?\bDHCPREQUEST\b")
+    
+    opener = gzip.open if file_path.endswith('.gz') else open
+    with opener(file_path, 'rt', encoding='utf-8', errors='replace') as f:
+        for line in f:
+            m = pattern.search(line)
+            if m:
+                time_str = m.group(1)
+                host = m.group(2)
+                time_str = re.sub(r'\s+', ' ', time_str)
+                dt = datetime.datetime.strptime(f"2000 {time_str}", "%Y %b %d %H:%M:%S")
+                requests[host].append(dt.timestamp())
+                
+    for host in sorted(requests.keys()):
+        t_list = requests[host]
+        t_list.sort()
         
-    for host, timestamps in host_requests.items():
-        timestamps.sort()
-        n = len(timestamps)
-        if n <= 100:
-            continue
-            
         max_count = 0
-        best_start_ts = None
-        best_end_ts = None
+        best_start = 0.0
+        best_end = 0.0
         
-        i = 0
-        j = 0
-        while i < n:
-            while j < n and timestamps[j] - timestamps[i] <= 1800.0:
-                j += 1
-            count = j - i
+        n = len(t_list)
+        left = 0
+        for right in range(n):
+            while t_list[right] - t_list[left] > 1800:
+                left += 1
+            count = right - left + 1
             if count > max_count:
                 max_count = count
-                best_start_ts = timestamps[i]
-                best_end_ts = timestamps[j - 1]
-            i += 1
-            
+                best_start = t_list[left]
+                best_end = t_list[right]
+                
         if max_count > 100:
-            print(f"{host} {int(max_count)} {float(best_start_ts)} {float(best_end_ts)}")
+            print(f"{host} {max_count} {best_start} {best_end}")
 
 if __name__ == '__main__':
-    process_logs()
+    main()
   precision=1.0000 recall=1.0000 f1=1.0000 TP=30 FP=0 FN=0 returned=30 must=30
   may_precision=1.0000 may_recall=1.0000 may_f1=1.0000 may_TP=30 may_FP=0 may_FN=0 may=30
   retries=0
-  input_tokens=20099 output_tokens=672
-  elapsed_seconds=100.02
+  input_tokens=20143 output_tokens=535
+  elapsed_seconds=111.51
 
 ID: multiline_3 | type: select | query: Identify transaction_ids where a second DHCPREQUEST occurs before the DHCPACK for the first.
   requested output format=transaction_id
@@ -201,377 +153,195 @@ ID: multiline_3 | type: select | query: Identify transaction_ids where a second 
 import re
 import gzip
 
-def process_file(filepath):
-    log_pattern = re.compile(r'(?:^|.*?\s)(\S+)\s+dhclient(?:\[(\d+)\])?:\s+(.*)$')
-    events = r'DHCPREQUEST|DHCPACK|DHCPDISCOVER|DHCPOFFER|DHCPDECLINE|DHCPRELEASE|DHCPINFORM|DHCPNAK'
-    event_pattern = re.compile(rf'\b({events})\b(.*?)(?=\b(?:{events})\b|$)', re.IGNORECASE)
-    xid_pattern = re.compile(r'\bxid=(0x[0-9a-fA-F]+)\b')
+def process_log(file_path):
+    # Regex to match the standard syslog prefix and dhclient process identifier.
+    # Handles optional syslog priority <...>, optional host, and optional PID.
+    prefix_re = re.compile(
+        r'(?:<\d+>)?'
+        r'(?:[A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2})\s+'
+        r'(?:(?P<host>\S+)\s+)?'
+        r'dhclient(?:\[(?P<pid>\d+)\])?:\s+'
+    )
+    xid_re = re.compile(r'\(xid=(0x[0-9a-fA-F]+)\)')
     
-    active_xid = {} 
-    request_counts = {} 
-    emitted = set()
-
-    open_func = gzip.open if filepath.endswith('.gz') else open
+    active_xid = {}       # (host, pid) -> last seen xid
+    states = {}           # (host, xid) -> state (0: init/acked, 1: 1 request seen, 2: matched)
+    matched_xids = set()  # To ensure we only output each transaction_id once
     
+    opener = gzip.open if file_path.endswith('.gz') else open
     try:
-        with open_func(filepath, 'rt', encoding='utf-8', errors='ignore') as f:
+        with opener(file_path, 'rt', encoding='utf-8', errors='ignore') as f:
             for line in f:
-                log_match = log_pattern.match(line)
-                if not log_match:
+                line = line.strip()
+                headers = list(prefix_re.finditer(line))
+                if not headers:
                     continue
-                
-                host = log_match.group(1)
-                pid = log_match.group(2)
-                msg = log_match.group(3)
-                
-                host_pid = (host, pid)
-                
-                for ev_match in event_pattern.finditer(msg):
-                    event_type = ev_match.group(1).upper()
-                    event_text = ev_match.group(2)
                     
-                    xid_m = xid_pattern.search(event_text)
-                    if xid_m:
-                        xid = xid_m.group(1)
-                        active_xid[host_pid] = xid
+                # Iterate through all dhclient messages in the line (handles nested syslogs)
+                for i in range(len(headers)):
+                    m = headers[i]
+                    start_idx = m.end()
+                    end_idx = headers[i+1].start() if i + 1 < len(headers) else len(line)
+                    msg = line[start_idx:end_idx].strip()
+                    
+                    host = m.group('host')
+                    # If a nested message lacks a host, inherit from the first message in the line
+                    if not host:
+                        host = headers[0].group('host')
+                    pid = m.group('pid')
+                    
+                    xid = None
+                    xid_match = xid_re.search(msg)
+                    if xid_match:
+                        xid = xid_match.group(1)
+                        active_xid[(host, pid)] = xid
                     else:
-                        xid = active_xid.get(host_pid)
-                    
+                        # Fallback to the last known xid for this host+pid
+                        xid = active_xid.get((host, pid))
+                        
                     if not xid:
                         continue
-                    
-                    state_key = (host, xid)
-                    
-                    if event_type == 'DHCPREQUEST':
-                        if state_key not in emitted:
-                            count = request_counts.get(state_key, 0)
-                            count += 1
-                            request_counts[state_key] = count
-                            if count == 2:
+                        
+                    if msg.startswith('DHCPREQUEST'):
+                        state = states.get((host, xid), 0)
+                        if state == 0:
+                            states[(host, xid)] = 1
+                        elif state == 1:
+                            states[(host, xid)] = 2
+                            if xid not in matched_xids:
                                 print(xid)
-                                emitted.add(state_key)
-                    elif event_type == 'DHCPACK':
-                        if state_key not in emitted:
-                            request_counts[state_key] = 0
+                                matched_xids.add(xid)
+                    elif msg.startswith('DHCPACK'):
+                        if (host, xid) in states:
+                            states[(host, xid)] = 0
     except Exception:
         pass
 
 if __name__ == '__main__':
     if len(sys.argv) > 1:
-        process_file(sys.argv[1])
+        process_log(sys.argv[1])
   precision=0.9783 recall=1.0000 f1=0.9890 TP=587 FP=13 FN=0 returned=600 must=587
   may_precision=0.9783 may_recall=1.0000 may_f1=0.9890 may_TP=587 may_FP=13 may_FN=0 may=587
   retries=0
-  input_tokens=19967 output_tokens=690
-  elapsed_seconds=172.37
+  input_tokens=19967 output_tokens=843
+  elapsed_seconds=167.31
 
 ID: multiline_4 | type: select | query: For each client that sent at least one DHCPDISCOVER with an explicit transaction ID, count how many transaction IDs begin with DHCPDISCOVER, how many of those later contain DHCPACK, and the resulting completion rate.
   requested output format=client,discover_started_transactions,completed_with_ack,completion_rate
   requested output data type=string,integer,integer,float
   command: import sys
-import re
 import gzip
+import re
 
-def process_logs(filepath):
-    client_xids = {}
+def main():
+    if len(sys.argv) < 2:
+        return
+    file_path = sys.argv[1]
+
+    log_pattern = re.compile(
+        r'(?:^|<\d+>)'
+        r'[A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+'
+        r'(?:(?P<host>\S+)\s+)?'
+        r'(?P<proc>[a-zA-Z0-9_\-]+)(?:\[(?P<pid>\d+)\])?:\s+'
+        r'(?P<msg>.*?)'
+        r'(?=(?:<\d+>[A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+)|$)',
+        re.DOTALL
+    )
+
+    event_pattern = re.compile(r'^(DHCP[A-Z]+)\b')
+    xid_pattern = re.compile(r'\(xid=(0[xX][0-9a-fA-F]+)\)')
+
     clients_with_explicit_discover = set()
-    active_xids = {}
+    tx_first_event = {}
+    tx_has_ack = set()
+    host_pid_to_xid = {}
 
-    # Regex patterns for parsing
-    syslog_re = re.compile(r'^[A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+(?P<client>\S+)\s+dhclient(?:\[(?P<pid>\d+)\])?:\s+(?P<msg>.*)')
-    inner_syslog_re = re.compile(r'<\d+>[A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+(?:\S+\s+)?dhclient(?:\[\d+\])?:\s*')
-    xid_re = re.compile(r'\(xid=(0x[0-9a-fA-F]+)\)')
-    event_re = re.compile(r'\b(DHCPDISCOVER|DHCPACK|DHCPREQUEST|DHCPDECLINE|DHCPRELEASE|DHCPOFFER|DHCPNAK|DHCPINFORM)\b')
+    opener = gzip.open if file_path.endswith('.gz') else open
 
-    open_func = gzip.open if filepath.endswith('.gz') else open
-
-    with open_func(filepath, 'rt', encoding='utf-8', errors='replace') as f:
+    with opener(file_path, 'rt', encoding='utf-8', errors='replace') as f:
         for line in f:
-            match = syslog_re.match(line)
-            if not match:
-                continue
-            client = match.group('client')
-            pid = match.group('pid')
-            msg = match.group('msg')
-
-            # Split message if it contains nested syslog headers (concatenated forwarding)
-            sub_msgs = inner_syslog_re.split(msg)
-            for sub_msg in sub_msgs:
-                if not sub_msg.strip():
+            current_host = None
+            for m in log_pattern.finditer(line):
+                host = m.group('host')
+                if host:
+                    current_host = host
+                
+                if current_host is None:
                     continue
+                
+                client = current_host
+                pid = m.group('pid')
+                msg = m.group('msg').strip()
 
-                # Extract explicit transaction ID if present
-                xid_match = xid_re.search(sub_msg)
-                if xid_match:
-                    xid = xid_match.group(1)
-                    is_explicit = True
-                    # Update unambiguous current active xid for this process
-                    active_xids[(client, pid)] = xid
-                else:
-                    is_explicit = False
-                    # Fallback inference if unambiguous
-                    xid = active_xids.get((client, pid))
-
-                # Determine event type in this message part
-                events = event_re.findall(sub_msg)
-                if not events:
+                ev_m = event_pattern.match(msg)
+                if not ev_m:
                     continue
-                event = events[-1]
+                event_type = ev_m.group(1)
 
-                # DHCPDISCOVER starts a new transaction; it shouldn't inherit previous xids if missing
-                if not is_explicit and event == 'DHCPDISCOVER':
-                    if (client, pid) in active_xids:
-                        del active_xids[(client, pid)]
-                    continue
+                x_m = xid_pattern.search(msg)
+                explicit_xid = x_m.group(1) if x_m else None
 
-                if not xid:
-                    continue
-
-                # Track clients that sent explicit discovers
-                if event == 'DHCPDISCOVER' and is_explicit:
+                if event_type == 'DHCPDISCOVER' and explicit_xid is not None:
                     clients_with_explicit_discover.add(client)
 
-                if client not in client_xids:
-                    client_xids[client] = {}
-
-                # State machine per client/xid transaction
-                state = client_xids[client].get(xid)
-                if state is None:
-                    if event == 'DHCPDISCOVER':
-                        client_xids[client][xid] = 'started_with_discover'
-                    else:
-                        client_xids[client][xid] = 'started_with_other'
+                if explicit_xid is not None:
+                    xid = explicit_xid
+                    if pid is not None:
+                        host_pid_to_xid[(client, pid)] = xid
                 else:
-                    if event == 'DHCPACK' and state == 'started_with_discover':
-                        client_xids[client][xid] = 'completed'
+                    if event_type == 'DHCPDISCOVER':
+                        if pid is not None:
+                            host_pid_to_xid.pop((client, pid), None)
+                        xid = None
+                    else:
+                        if pid is not None:
+                            xid = host_pid_to_xid.get((client, pid))
+                        else:
+                            xid = None
 
-    # Output phase
-    for client in sorted(clients_with_explicit_discover):
-        started = 0
-        completed = 0
-        for xid, state in client_xids[client].items():
-            if state in ('started_with_discover', 'completed'):
-                started += 1
-                if state == 'completed':
-                    completed += 1
+                if xid is not None:
+                    if (client, xid) not in tx_first_event:
+                        tx_first_event[(client, xid)] = event_type
+                    
+                    if event_type == 'DHCPACK':
+                        tx_has_ack.add((client, xid))
 
-        rate = float(completed) / started if started > 0 else 0.0
-        print(f"{client} {started} {completed} {rate}")
+    client_stats = {}
+    for client in clients_with_explicit_discover:
+        client_stats[client] = {'discover_started': 0, 'completed_with_ack': 0}
+
+    for (client, xid), ev in tx_first_event.items():
+        if client in client_stats and ev == 'DHCPDISCOVER':
+            client_stats[client]['discover_started'] += 1
+            if (client, xid) in tx_has_ack:
+                client_stats[client]['completed_with_ack'] += 1
+
+    for client in sorted(client_stats.keys()):
+        stats = client_stats[client]
+        ds = stats['discover_started']
+        ca = stats['completed_with_ack']
+        if ds > 0:
+            cr = float(ca) / float(ds)
+        else:
+            cr = 0.0
+        print(f"{client} {ds} {ca} {cr}")
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1:
-        process_logs(sys.argv[1])
+    main()
   precision=0.9948 recall=0.9847 f1=0.9897 TP=193 FP=1 FN=3 returned=194 must=196
   may_precision=0.9948 may_recall=0.9847 may_f1=0.9897 may_TP=193 may_FP=1 may_FN=3 may=196
-  retries=0
-  input_tokens=20032 output_tokens=1124
-  elapsed_seconds=199.71
+  retries=1
+  input_tokens=40097 output_tokens=2125
+  elapsed_seconds=276.21
 
 ID: multiline_5 | type: select | query: Considering only client/process streams that contain DHCPDISCOVER, DHCPOFFER, DHCPREQUEST, and DHCPACK, return for each client the average elapsed seconds between the DISCOVER and ACK.
   requested output format=client,avg_discover_to_ack_seconds
   requested output data type=string,float
   command: import sys
+import re
+import datetime
 import gzip
-import re
 from collections import defaultdict
-from datetime import datetime
-
-def main():
-    if len(sys.argv) < 2:
-        return
-    filename = sys.argv[1]
-    
-    open_func = gzip.open if filename.endswith('.gz') else open
-    
-    # Regex to match the syslog format
-    # Example: "Nov  8 08:45:50 x-www dhclient: DHCPREQUEST ..."
-    log_pattern = re.compile(r'^([A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2})\s+(\S+)\s+([^:\[]+)(?:\[(\d+)\])?:\s+(.*)')
-    
-    streams = defaultdict(lambda: {
-        'events': set(),
-        'lines': []
-    })
-    
-    xid_pattern = re.compile(r'xid=([^)\s]+)')
-    
-    try:
-        with open_func(filename, 'rt', encoding='utf-8', errors='ignore') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                m = log_pattern.match(line)
-                if not m:
-                    continue
-                ts_str, host, process, pid, msg = m.groups()
-                
-                evs = []
-                if re.search(r'\bDHCPDISCOVER\b', msg): evs.append('DISCOVER')
-                if re.search(r'\bDHCPOFFER\b', msg): evs.append('OFFER')
-                if re.search(r'\bDHCPREQUEST\b', msg): evs.append('REQUEST')
-                if re.search(r'\bDHCPACK\b', msg): evs.append('ACK')
-                
-                if not evs:
-                    continue
-                    
-                stream_id = (host, process, pid)
-                stream_dict = streams[stream_id]
-                
-                for ev in evs:
-                    stream_dict['events'].add(ev)
-                    if ev in ('DISCOVER', 'ACK'):
-                        xid_match = xid_pattern.search(msg)
-                        xid = xid_match.group(1) if xid_match else None
-                        
-                        # Clean timestamp string to ensure robust parsing with %d
-                        ts_clean = re.sub(r'\s+', ' ', ts_str)
-                        try:
-                            dt = datetime.strptime(f"2000 {ts_clean}", "%Y %b %d %H:%M:%S")
-                            ts = dt.timestamp()
-                        except ValueError:
-                            continue
-                            
-                        stream_dict['lines'].append({
-                            'type': ev,
-                            'ts': ts,
-                            'xid': xid
-                        })
-    except Exception:
-        pass
-
-    client_elapsed = defaultdict(list)
-    
-    # Process valid streams and calculate elapsed time between DISCOVER and ACK
-    for stream_id, stream_data in streams.items():
-        if {'DISCOVER', 'OFFER', 'REQUEST', 'ACK'}.issubset(stream_data['events']):
-            host = stream_id[0]
-            pending = {}
-            for item in stream_data['lines']:
-                ev = item['type']
-                xid = item['xid']
-                ts = item['ts']
-                
-                if ev == 'DISCOVER':
-                    if xid not in pending:
-                        pending[xid] = ts
-                elif ev == 'ACK':
-                    if xid in pending:
-                        elapsed = ts - pending[xid]
-                        client_elapsed[host].append(elapsed)
-                        del pending[xid]
-
-    for host, elapseds in client_elapsed.items():
-        if elapseds:
-            avg = sum(elapseds) / len(elapseds)
-            print(f"{host} {avg}")
-
-if __name__ == '__main__':
-    main()
-  precision=0.6248 recall=0.6462 f1=0.6353 TP=378 FP=227 FN=207 returned=605 must=585
-  may_precision=0.6248 may_recall=0.6462 may_f1=0.6353 may_TP=378 may_FP=227 may_FN=207 may=585
-  retries=0
-  input_tokens=20008 output_tokens=1020
-  elapsed_seconds=138.0
-
-ID: multiline_6 | type: select | query: For each DHCP server IP address, count the total number of OFFER messages sent. Then count how many of those OFFER messages resulted in a corresponding ACK within 60 seconds for the same transaction. Compute the conversion rate.
-  requested output format=server_ip,offer_total,offer_with_ack_60s,conversion_rate
-  requested output data type=string,integer,integer,float
-  command: import sys
-import re
-import gzip
-from datetime import datetime
-from collections import defaultdict
-
-def main():
-    if len(sys.argv) < 2:
-        return
-        
-    filepath = sys.argv[1]
-    
-    # Regex for parsing standard syslog lines
-    log_pattern = re.compile(r'^([A-Z][a-z]{2}\s+\d+\s+\d+:\d+:\d+)\s+(\S+)\s+([^:]+):\s+(.*)')
-    offer_pattern = re.compile(r'DHCPOFFER from ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)')
-    ack_pattern = re.compile(r'DHCPACK from ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)')
-    
-    server_stats = {} # ip -> {'offer': int, 'ack': int}
-    pending_offers = defaultdict(list) # (host, pid, ip) -> [timestamp1, timestamp2, ...]
-    
-    opener = gzip.open if filepath.endswith('.gz') else open
-    
-    try:
-        with opener(filepath, 'rt', encoding='utf-8', errors='ignore') as f:
-            for line in f:
-                m = log_pattern.match(line)
-                if not m:
-                    continue
-                
-                ts_str, host, proc_str, msg = m.groups()
-                
-                offer_m = offer_pattern.search(msg)
-                ack_m = ack_pattern.search(msg)
-                
-                if offer_m or ack_m:
-                    pid = None
-                    pm = re.search(r'\[(\d+)\]', proc_str)
-                    if pm:
-                        pid = pm.group(1)
-                    
-                    try:
-                        # Parse timestamp assuming year 2000 to avoid rollover issues
-                        ts = int(datetime.strptime(f"2000 {ts_str}", "%Y %b %d %H:%M:%S").timestamp())
-                    except ValueError:
-                        continue
-                        
-                    if offer_m:
-                        ip = offer_m.group(1)
-                        if ip not in server_stats:
-                            server_stats[ip] = {'offer': 0, 'ack': 0}
-                        server_stats[ip]['offer'] += 1
-                        
-                        pending_offers[(host, pid, ip)].append(ts)
-                        
-                    elif ack_m:
-                        ip = ack_m.group(1)
-                        key = (host, pid, ip)
-                        if key in pending_offers and pending_offers[key]:
-                            valid_offer_idx = -1
-                            # Find the oldest corresponding OFFER within 60 seconds
-                            for i, ots in enumerate(pending_offers[key]):
-                                if 0 <= ts - ots <= 60:
-                                    valid_offer_idx = i
-                                    break
-                            
-                            if valid_offer_idx != -1:
-                                pending_offers[key].pop(valid_offer_idx)
-                                if ip not in server_stats:
-                                    server_stats[ip] = {'offer': 0, 'ack': 0}
-                                server_stats[ip]['ack'] += 1
-                                
-                            # Clean up old offers
-                            pending_offers[key] = [ots for ots in pending_offers[key] if ts - ots <= 60]
-    except Exception:
-        pass
-        
-    for ip, stats in server_stats.items():
-        offer = stats['offer']
-        if offer > 0:
-            rate = stats['ack'] / offer
-            print(f"{ip} {offer} {stats['ack']} {rate}")
-
-if __name__ == '__main__':
-    main()
-  precision=0.9681 recall=0.9538 f1=0.9609 TP=516 FP=17 FN=25 returned=533 must=541
-  may_precision=0.9681 may_recall=0.9538 may_f1=0.9609 may_TP=516 may_FP=17 may_FN=25 may=541
-  retries=2
-  input_tokens=60189 output_tokens=3376
-  elapsed_seconds=415.01
-
-ID: multiline_7 | type: select | query: For each client, count transaction IDs that contain a DISCOVER and do not contain an ACK within 120 seconds. Only use transactions with an explicit transaction ID, return only clients with a nonzero count, and sort the results in descending order.
-  requested output format=client,discover_without_ack_120s_count
-  requested output data type=string,integer
-  command: import sys
-import re
-from datetime import datetime
 
 def main():
     if len(sys.argv) < 2:
@@ -579,77 +349,345 @@ def main():
         
     log_file = sys.argv[1]
     
-    xid_pattern = re.compile(r"\(xid=(0x[0-9a-fA-F]+)\)")
-    months = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
+    # Regex for standard syslog entries matching dhclient
+    line_re = re.compile(
+        r'^(?P<month>[A-Z][a-z]{2})\s+(?P<day>\d+)\s+(?P<time>\d{2}:\d{2}:\d{2})\s+'
+        r'(?P<host>\S+)\s+'
+        r'(?:\S*dhclient)\b(?:\[(?P<pid>\d+)\])?:\s+(?P<msg>.*)'
+    )
     
-    transactions = {}
+    # Regex for embedded syslog messages that are occasionally appended on the same line
+    embed_pattern = re.compile(
+        r'(.*?)<(\d+)>([A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2})\s+(?:\S*dhclient)\b(?:\[(\d+)\])?:\s+(.*)'
+    )
     
-    try:
-        with open(log_file, 'r', errors='replace') as f:
-            for line in f:
-                parts = line.strip().split(maxsplit=4)
-                if len(parts) >= 5 and parts[0] in months:
-                    month, day, time_str, client, msg = parts
-                    
-                    if "DHCP" not in msg:
-                        continue
-                    
-                    is_discover = bool(re.search(r'\bDHCPDISCOVER\b', msg))
-                    is_ack = bool(re.search(r'\bDHCPACK\b', msg))
-                    
-                    if not (is_discover or is_ack):
-                        continue
-                    
-                    xid_match = xid_pattern.search(msg)
-                    if not xid_match:
-                        continue
-                        
-                    xid = xid_match.group(1)
-                    
-                    time_string = f"2000 {month} {day} {time_str}"
-                    ts = datetime.strptime(time_string, "%Y %b %d %H:%M:%S").timestamp()
-                    
-                    key = (client, xid)
-                    if key not in transactions:
-                        transactions[key] = {'discovers': [], 'acks': []}
-                    
-                    if is_discover:
-                        transactions[key]['discovers'].append(ts)
-                    if is_ack:
-                        transactions[key]['acks'].append(ts)
-    except Exception:
-        pass
+    def parse_time(dt_str):
+        # Normalize spaces and parse
+        dt_str = re.sub(r'\s+', ' ', dt_str.strip())
+        dt = datetime.datetime.strptime(dt_str, "%b %d %H:%M:%S")
+        # Using year 2000 since it is a leap year (handles Feb 29)
+        return dt.replace(year=2000).timestamp()
 
-    counts = {}
-    for (client, xid), data in transactions.items():
-        t_discs = data['discovers']
-        t_acks = data['acks']
-        
-        if not t_discs:
-            continue
+    active_by_hx = {}
+    active_by_hp = defaultdict(list)
+    completed_durations = defaultdict(list)
+    
+    def process_event(host, pid, ev_type, xid, ts):
+        # Clean stale transactions (e.g. ones that failed to complete after 120 seconds)
+        stale = [t for t in active_by_hp[(host, pid)] if ts - t['last_seen'] > 120]
+        for t in stale:
+            if t['xid'] and (host, t['xid']) in active_by_hx:
+                del active_by_hx[(host, t['xid'])]
+            active_by_hp[(host, pid)].remove(t)
+
+        if ev_type == 'DISCOVER':
+            if xid:
+                if (host, xid) in active_by_hx:
+                    txn = active_by_hx[(host, xid)]
+                    txn['events'].add('DISCOVER')
+                    txn['last_seen'] = ts
+                else:
+                    txn = {'xid': xid, 'pid': pid, 'events': {'DISCOVER'}, 'discover_time': ts, 'last_seen': ts}
+                    active_by_hx[(host, xid)] = txn
+                    active_by_hp[(host, pid)].append(txn)
+            else:
+                # Only keep at most one xid=None transaction per (host, pid) to avoid ambiguity on match
+                existing = [t for t in active_by_hp[(host, pid)] if t['xid'] is None]
+                if existing:
+                    txn = existing[0]
+                    txn['events'].add('DISCOVER')
+                    txn['last_seen'] = ts
+                else:
+                    txn = {'xid': None, 'pid': pid, 'events': {'DISCOVER'}, 'discover_time': ts, 'last_seen': ts}
+                    active_by_hp[(host, pid)].append(txn)
+
+        elif ev_type in ('OFFER', 'REQUEST', 'ACK'):
+            matched_txns = []
+            if xid:
+                if (host, xid) in active_by_hx:
+                    matched_txns = [active_by_hx[(host, xid)]]
+                else:
+                    # Try to fall back to an active transaction missing an xid
+                    candidates = [t for t in active_by_hp[(host, pid)] if t['xid'] is None]
+                    if len(candidates) == 1:
+                        txn = candidates[0]
+                        txn['xid'] = xid
+                        active_by_hx[(host, xid)] = txn
+                        matched_txns = [txn]
+            else:
+                # If event lacks XID, only assign if there is exactly 1 active attempt for (host, pid)
+                candidates = active_by_hp[(host, pid)]
+                if len(candidates) == 1:
+                    matched_txns = candidates
+
+            for txn in matched_txns:
+                txn['events'].add(ev_type)
+                txn['last_seen'] = ts
+                if ev_type == 'ACK':
+                    # Check if stream contains all expected message types
+                    if {'DISCOVER', 'OFFER', 'REQUEST', 'ACK'}.issubset(txn['events']):
+                        elapsed = ts - txn['discover_time']
+                        # Omit records where elapsed time is negative (e.g. crossing unmodified year boundary)
+                        if elapsed >= 0:
+                            completed_durations[host].append(elapsed)
+                    
+                    # Cleanup completed stream
+                    if txn['xid'] and (host, txn['xid']) in active_by_hx:
+                        del active_by_hx[(host, txn['xid'])]
+                    if txn in active_by_hp[(host, pid)]:
+                        active_by_hp[(host, pid)].remove(txn)
+
+    def parse_part_msg(part_msg):
+        part_msg = part_msg.strip()
+        ev_type = None
+        if part_msg.startswith('DHCPDISCOVER'):
+            ev_type = 'DISCOVER'
+        elif part_msg.startswith('DHCPOFFER'):
+            ev_type = 'OFFER'
+        elif part_msg.startswith('DHCPREQUEST'):
+            ev_type = 'REQUEST'
+        elif part_msg.startswith('DHCPACK'):
+            ev_type = 'ACK'
+        else:
+            return None, None
             
-        has_ack_within_120 = False
-        for disc in t_discs:
-            for ack in t_acks:
-                if 0 <= ack - disc <= 120:
-                    has_ack_within_120 = True
-                    break
-            if has_ack_within_120:
+        xid_m = re.search(r'\(xid=(0x[0-9a-fA-F]+)\)', part_msg)
+        xid = xid_m.group(1) if xid_m else None
+        return ev_type, xid
+
+    def extract_events(line):
+        m = line_re.match(line)
+        if not m:
+            return []
+            
+        month = m.group('month')
+        day = m.group('day')
+        time_str = m.group('time')
+        host = m.group('host')
+        pid = m.group('pid')
+        msg = m.group('msg')
+        
+        events_parsed = []
+        current_msg = msg
+        current_dt_str = f"{month} {day} {time_str}"
+        current_pid = pid
+        
+        while True:
+            em = embed_pattern.match(current_msg)
+            if em:
+                part_msg = em.group(1).strip()
+                if part_msg:
+                    ev_type, xid = parse_part_msg(part_msg)
+                    if ev_type:
+                        try:
+                            ts = parse_time(current_dt_str)
+                            events_parsed.append((host, current_pid, ev_type, xid, ts))
+                        except ValueError:
+                            pass
+                current_dt_str = em.group(3)
+                current_pid = em.group(4) if em.group(4) else current_pid
+                current_msg = em.group(5).strip()
+            else:
+                if current_msg:
+                    ev_type, xid = parse_part_msg(current_msg)
+                    if ev_type:
+                        try:
+                            ts = parse_time(current_dt_str)
+                            events_parsed.append((host, current_pid, ev_type, xid, ts))
+                        except ValueError:
+                            pass
                 break
                 
-        if not has_ack_within_120:
-            counts[client] = counts.get(client, 0) + 1
-            
-    for client, count in sorted(counts.items(), key=lambda x: x[1], reverse=True):
-        print(f"{client} {count}")
+        return events_parsed
 
-if __name__ == "__main__":
+    opener = gzip.open if log_file.endswith('.gz') else open
+    with opener(log_file, 'rt', encoding='utf-8', errors='replace') as f:
+        for line in f:
+            for ev in extract_events(line):
+                process_event(*ev)
+                
+    for host in sorted(completed_durations.keys()):
+        durs = completed_durations[host]
+        if durs:
+            avg = sum(durs) / len(durs)
+            print(f"{host} {avg}")
+
+if __name__ == '__main__':
+    main()
+  precision=0.6594 recall=0.6684 f1=0.6638 TP=391 FP=202 FN=194 returned=593 must=585
+  may_precision=0.6594 may_recall=0.6684 may_f1=0.6638 may_TP=391 may_FP=202 may_FN=194 may=585
+  retries=0
+  input_tokens=20008 output_tokens=2172
+  elapsed_seconds=208.63
+
+ID: multiline_6 | type: select | query: For each DHCP server IP address, count the total number of OFFER messages sent. Then count how many of those OFFER messages resulted in a corresponding ACK within 60 seconds for the same transaction. Compute the conversion rate.
+  requested output format=server_ip,offer_total,offer_with_ack_60s,conversion_rate
+  requested output data type=string,integer,integer,float
+  command: import sys
+import re
+import gzip
+from collections import defaultdict
+from datetime import datetime
+
+def main():
+    if len(sys.argv) < 2:
+        return
+
+    filepath = sys.argv[1]
+    
+    # unacked_offers[server_ip][(host, pid)] = list of offer dicts
+    unacked_offers = defaultdict(lambda: defaultdict(list))
+    
+    # stats[server_ip] = {'total': int, 'acked': int}
+    stats = defaultdict(lambda: {"total": 0, "acked": 0})
+    
+    line_pattern = re.compile(r'^([A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2})\s+(\S+)\s+dhclient(?:\[(\d+)\])?:\s+(.*)')
+    event_pattern = re.compile(r'(DHCPOFFER|DHCPACK) from ([0-9a-fA-F\.:]+)(?:\s+\(xid=(0x[0-9a-fA-F]+)\))?')
+    
+    opener = gzip.open if filepath.endswith('.gz') else open
+    
+    try:
+        with opener(filepath, 'rt', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                match = line_pattern.match(line)
+                if not match:
+                    continue
+                
+                ts_str, host, pid, msg = match.groups()
+                
+                ts_str = re.sub(r'\s+', ' ', ts_str)
+                try:
+                    ts = datetime.strptime(f"2000 {ts_str}", "%Y %b %d %H:%M:%S").timestamp()
+                except ValueError:
+                    continue
+                
+                for ev_match in event_pattern.finditer(msg):
+                    ev_type = ev_match.group(1)
+                    ip = ev_match.group(2)
+                    xid = ev_match.group(3)
+                    
+                    if ev_type == 'DHCPOFFER':
+                        offer_obj = {'ts': ts, 'acked': False, 'xid': xid}
+                        unacked_offers[ip][(host, pid)].append(offer_obj)
+                        stats[ip]["total"] += 1
+                        
+                    elif ev_type == 'DHCPACK':
+                        candidates = unacked_offers[ip][(host, pid)]
+                        best_offer = None
+                        for offer in candidates:
+                            if not offer['acked'] and (0 <= ts - offer['ts'] <= 60):
+                                if xid and offer['xid']:
+                                    if xid == offer['xid']:
+                                        best_offer = offer
+                                        break
+                                else:
+                                    if best_offer is None:
+                                        best_offer = offer
+                        
+                        if best_offer:
+                            best_offer['acked'] = True
+                            stats[ip]["acked"] += 1
+                            
+    except Exception:
+        pass
+        
+    for ip, s in stats.items():
+        offer_total = s["total"]
+        if offer_total == 0:
+            continue
+        offer_with_ack_60s = s["acked"]
+        conversion_rate = offer_with_ack_60s / offer_total
+        print(f"{ip} {offer_total} {offer_with_ack_60s} {conversion_rate}")
+
+if __name__ == '__main__':
+    main()
+  precision=0.9664 recall=0.9575 f1=0.9619 TP=518 FP=18 FN=23 returned=536 must=541
+  may_precision=0.9664 may_recall=0.9575 may_f1=0.9619 may_TP=518 may_FP=18 may_FN=23 may=541
+  retries=0
+  input_tokens=20041 output_tokens=911
+  elapsed_seconds=169.92
+
+ID: multiline_7 | type: select | query: For each client, count transaction IDs that contain a DISCOVER and do not contain an ACK within 120 seconds. Only use transactions with an explicit transaction ID, return only clients with a nonzero count, and sort the results in descending order.
+  requested output format=client,discover_without_ack_120s_count
+  requested output data type=string,integer
+  command: import sys
+import re
+import datetime
+from collections import defaultdict
+
+def main():
+    if len(sys.argv) < 2:
+        return
+        
+    log_pattern = re.compile(r'^([A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2})\s+(\S+)\s+dhclient(?:\[\d+\])?:\s+(.*)')
+    xid_pattern = re.compile(r'\(xid=(0x[0-9a-fA-F]+)\)')
+    
+    transactions = defaultdict(lambda: {'discover': [], 'ack': []})
+    
+    try:
+        with open(sys.argv[1], 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                m = log_pattern.match(line)
+                if not m:
+                    continue
+                ts_str, client, msg = m.groups()
+                
+                has_discover = 'DHCPDISCOVER' in msg
+                has_ack = 'DHCPACK' in msg
+                if not (has_discover or has_ack):
+                    continue
+                    
+                xid_m = xid_pattern.search(msg)
+                if not xid_m:
+                    continue
+                xid = xid_m.group(1)
+                
+                ts_str_clean = re.sub(r'\s+', ' ', ts_str)
+                try:
+                    dt = datetime.datetime.strptime("2000 " + ts_str_clean, "%Y %b %d %H:%M:%S")
+                    ts = dt.timestamp()
+                except ValueError:
+                    continue
+                    
+                if has_discover:
+                    transactions[(client, xid)]['discover'].append(ts)
+                if has_ack:
+                    transactions[(client, xid)]['ack'].append(ts)
+    except Exception:
+        pass
+                
+    client_counts = defaultdict(int)
+    
+    for (client, xid), evs in transactions.items():
+        if not evs['discover']:
+            continue
+            
+        no_ack = False
+        for d_ts in evs['discover']:
+            has_ack = False
+            for a_ts in evs['ack']:
+                if 0 <= a_ts - d_ts <= 120:
+                    has_ack = True
+                    break
+            if not has_ack:
+                no_ack = True
+                break
+                
+        if no_ack:
+            client_counts[client] += 1
+            
+    sorted_clients = sorted(client_counts.items(), key=lambda x: x[1], reverse=True)
+    for client, count in sorted_clients:
+        if count > 0:
+            print(f"{client} {count}")
+
+if __name__ == '__main__':
     main()
   precision=1.0000 recall=0.9762 f1=0.9880 TP=41 FP=0 FN=1 returned=41 must=42
   may_precision=1.0000 may_recall=0.9762 may_f1=0.9880 may_TP=41 may_FP=0 may_FN=1 may=42
-  retries=0
-  input_tokens=20025 output_tokens=769
-  elapsed_seconds=82.98
+  retries=2
+  input_tokens=60141 output_tokens=2689
+  elapsed_seconds=275.3
 
 ID: multiline_8 | type: select | query: For each client and network interface, count the total number of DISCOVER and REQUEST messages observed. Output one row per client and interface.
   requested output format=client,interface,discover_count,request_count
@@ -662,96 +700,114 @@ from collections import defaultdict
 def main():
     if len(sys.argv) < 2:
         return
+        
+    counts = defaultdict(lambda: [0, 0])
+    
+    # Regex to parse the standard syslog prefix and extract the client hostname and the message body
+    line_re = re.compile(r'^[A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+(\S+)\s+dhclient(?:\[\d+\])?:\s+(.*)')
+    
+    # Regexes to capture the network interface for DISCOVER and REQUEST messages
+    discover_re = re.compile(r'DHCPDISCOVER on (\S+)')
+    request_re = re.compile(r'DHCPREQUEST on (\S+)')
     
     file_path = sys.argv[1]
-    
-    # Matches syslog prefix: optional priority, date, hostname, dhclient (with optional pid), and colon
-    syslog_re = re.compile(r'^(?:<\d+>)?(?:[A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2})\s+(\S+)\s+dhclient(?:\[\d+\])?:\s+')
-    
-    # Matches DISCOVER and REQUEST messages to extract interface
-    msg_re = re.compile(r'(DHCPDISCOVER|DHCPREQUEST)\s+on\s+(\S+)')
-    
-    counts = defaultdict(lambda: {'DHCPDISCOVER': 0, 'DHCPREQUEST': 0})
-    
     open_func = gzip.open if file_path.endswith('.gz') else open
     
-    with open_func(file_path, 'rt', encoding='utf-8', errors='ignore') as f:
-        for line in f:
-            line = line.strip()
-            
-            m = syslog_re.match(line)
-            if not m:
-                continue
-            
-            client = m.group(1)
-            
-            # findall handles single messages as well as multiple concatenated syslog lines
-            for msg_type, interface in msg_re.findall(line):
-                counts[(client, interface)][msg_type] += 1
+    try:
+        with open_func(file_path, 'rt', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                m = line_re.search(line)
+                if not m:
+                    continue
+                    
+                client = m.group(1)
+                msg = m.group(2)
                 
-    for (client, interface), cnts in counts.items():
-        print(f"{client} {interface} {cnts['DHCPDISCOVER']} {cnts['DHCPREQUEST']}")
+                # Count all DHCPDISCOVER occurrences in the message
+                for iface in discover_re.findall(msg):
+                    counts[(client, iface)][0] += 1
+                    
+                # Count all DHCPREQUEST occurrences in the message
+                for iface in request_re.findall(msg):
+                    counts[(client, iface)][1] += 1
+                    
+    except Exception:
+        pass
+        
+    # Output the results: client interface discover_count request_count
+    for (client, iface), (d_count, r_count) in counts.items():
+        if d_count > 0 or r_count > 0:
+            print(f"{client} {iface} {d_count} {r_count}")
 
 if __name__ == '__main__':
     main()
   precision=0.9863 recall=0.9850 f1=0.9856 TP=1510 FP=21 FN=23 returned=1531 must=1533
   may_precision=0.9863 may_recall=0.9850 may_f1=0.9856 may_TP=1510 may_FP=21 may_FN=23 may=1533
   retries=0
-  input_tokens=20004 output_tokens=486
-  elapsed_seconds=91.97
+  input_tokens=20004 output_tokens=564
+  elapsed_seconds=85.07
 
 ID: multiline_9 | type: select | query: For each client, calculate the average number of DHCP messages logged per transaction ID. Only count DHCP messages that specify a transaction ID. 
   requested output format=client,avg_messages_per_transaction
   requested output data type=string,float
   command: import sys
 import re
-import gzip
 from collections import defaultdict
 
 def main():
     if len(sys.argv) < 2:
         return
         
-    filepath = sys.argv[1]
+    log_file = sys.argv[1]
     
-    # client -> xid -> count
-    client_xid_counts = defaultdict(lambda: defaultdict(int))
+    # Regex to match the typical syslog format and extract the client (hostname) and message body
+    syslog_re = re.compile(r'^[A-Z][a-z]{2}\s+\d+\s+\d\d:\d\d:\d\d\s+(?P<client>\S+)\s+[^:]+:\s+(?P<msg>.*)$')
     
-    # Parse syslog format: Month Day Time Host Process: Message
-    line_re = re.compile(r'^[A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+(\S+)\s+[^:]+:\s+(.*)$')
-    xid_re = re.compile(r'xid=(0x[0-9a-fA-F]+)')
+    # Regex to extract the transaction ID (xid)
+    xid_re = re.compile(r'\(xid=(0x[0-9a-fA-F]+)\)')
     
-    opener = gzip.open if filepath.endswith('.gz') else open
+    # Dictionary to keep track of message counts per xid, per client
+    # client_xids[client][xid] = count
+    client_xids = defaultdict(lambda: defaultdict(int))
+    
+    open_func = open
+    if log_file.endswith('.gz'):
+        import gzip
+        open_func = gzip.open
         
-    with opener(filepath, 'rt', encoding='utf-8', errors='ignore') as f:
-        for line in f:
-            m = line_re.match(line)
-            if not m:
-                continue
-            
-            client = m.group(1)
-            message = m.group(2)
-            
-            # A single log line is one message. Find all unique xids in this message.
-            xids = set(xid_re.findall(message))
-            for xid in xids:
-                client_xid_counts[client][xid] += 1
+    try:
+        with open_func(log_file, 'rt', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                m = syslog_re.match(line)
+                if not m:
+                    continue
                 
-    for client, xids in client_xid_counts.items():
-        if not xids:
+                client = m.group('client')
+                msg = m.group('msg')
+                
+                # Find all occurrences of xid in the message
+                xids = xid_re.findall(msg)
+                for xid in xids:
+                    client_xids[client][xid] += 1
+    except Exception:
+        pass
+        
+    # Calculate and output the average messages per transaction ID for each client
+    for client, xid_counts in client_xids.items():
+        if not xid_counts:
             continue
-        total_msgs = sum(xids.values())
-        num_xids = len(xids)
-        avg = float(total_msgs) / num_xids
-        print(f"{client} {avg}")
+        total_msgs = sum(xid_counts.values())
+        unique_xids = len(xid_counts)
+        avg_msgs = total_msgs / unique_xids
+        print(f"{client} {avg_msgs}")
 
 if __name__ == '__main__':
     main()
   precision=0.9971 recall=0.9912 f1=0.9941 TP=339 FP=1 FN=3 returned=340 must=342
   may_precision=0.9971 may_recall=0.9912 may_f1=0.9941 may_TP=339 may_FP=1 may_FN=3 may=342
   retries=0
-  input_tokens=19992 output_tokens=482
-  elapsed_seconds=89.94
+  input_tokens=19992 output_tokens=578
+  elapsed_seconds=95.3
 
 ID: multiline_10 | type: select | query: For each hour 0 through 23, count unique transaction IDs whose DISCOVER occurred in that hour. Then count how many of those same transaction IDs have an ACK anywhere in the log. Use only explicit transaction IDs and return all 24 hours with the completion rate for each hour.
   requested output format=hour_of_day,discover_transaction_count,completed_with_ack_count,completion_rate
@@ -764,194 +820,245 @@ def main():
     if len(sys.argv) < 2:
         return
         
-    file_path = sys.argv[1]
-    open_func = gzip.open if file_path.endswith('.gz') else open
+    path = sys.argv[1]
     
-    discover_xids_by_hour = {h: set() for h in range(24)}
-    ack_xids = set()
+    discover_by_hour = {h: set() for h in range(24)}
+    ack_set = set()
     
-    ts_pattern = re.compile(r'\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+\s+(\d{2}):\d{2}:\d{2}\b')
-    xid_pattern = re.compile(r'xid=(0x[0-9a-fA-F]+)')
+    # Match optional syslog PRI, timestamp (MMM DD HH:MM:SS), and host
+    line_re = re.compile(r'^\s*(?:<\d+>)?(?:[A-Z][a-z]{2}\s+\d+\s+(\d{2}):\d{2}:\d{2})\s+(\S+)')
+    # Match explicit transaction ID
+    xid_re = re.compile(r'\(xid=(0x[0-9a-fA-F]+)\)')
+    
+    open_func = gzip.open if path.endswith('.gz') else open
     
     try:
-        with open_func(file_path, 'rt', encoding='utf-8', errors='ignore') as f:
+        with open_func(path, 'rt', encoding='utf-8', errors='ignore') as f:
             for line in f:
-                xid_match = xid_pattern.search(line)
-                if not xid_match:
-                    continue
+                has_discover = 'DHCPDISCOVER' in line
+                has_ack = 'DHCPACK' in line
                 
-                ts_match = ts_pattern.search(line)
-                if not ts_match:
+                if not (has_discover or has_ack):
                     continue
                     
+                xid_match = xid_re.search(line)
+                if not xid_match:
+                    continue
+                    
+                time_match = line_re.search(line)
+                if not time_match:
+                    continue
+                    
+                hour = int(time_match.group(1))
+                host = time_match.group(2)
                 xid = xid_match.group(1)
                 
-                if 'DHCPDISCOVER' in line:
-                    hour = int(ts_match.group(1))
-                    discover_xids_by_hour[hour].add(xid)
-                if 'DHCPACK' in line:
-                    ack_xids.add(xid)
+                # Key by (client/host, transaction_id) as instructed for transaction-level joins
+                tx_id = (host, xid)
+                
+                if has_discover:
+                    discover_by_hour[hour].add(tx_id)
+                if has_ack:
+                    ack_set.add(tx_id)
     except Exception:
         pass
-        
+                    
     for h in range(24):
-        discovers = discover_xids_by_hour[h]
-        discover_count = len(discovers)
-        completed_count = sum(1 for x in discovers if x in ack_xids)
-        rate = float(completed_count) / discover_count if discover_count > 0 else 0.0
-        print(f"{h} {discover_count} {completed_count} {rate}")
+        discovers = discover_by_hour[h]
+        d_count = len(discovers)
+        # A transaction is completed if its specific (host, xid) had an ACK anywhere in the log
+        a_count = len(discovers.intersection(ack_set))
+        rate = float(a_count) / d_count if d_count > 0 else 0.0
+        
+        print(f"{h} {d_count} {a_count} {rate}")
 
 if __name__ == '__main__':
     main()
-  precision=0.9583 recall=0.9583 f1=0.9583 TP=23 FP=1 FN=1 returned=24 must=24
-  may_precision=0.9583 may_recall=0.9583 may_f1=0.9583 may_TP=23 may_FP=1 may_FN=1 may=24
+  precision=0.9167 recall=0.9167 f1=0.9167 TP=22 FP=2 FN=2 returned=24 must=24
+  may_precision=0.9167 may_recall=0.9167 may_f1=0.9167 may_TP=22 may_FP=2 may_FN=2 may=24
   retries=0
-  input_tokens=20060 output_tokens=543
-  elapsed_seconds=54.99
+  input_tokens=20060 output_tokens=687
+  elapsed_seconds=91.38
 
 ID: multiline_11 | type: select | query: Return the 1-indexed line number and hostname for each DHCPOFFER line where no DHCPDISCOVER from the same hostname/process stream occurred in the previous 30 seconds. If a DHCP message lacks a transaction ID, infer it from the latest transaction ID in the same process stream.
   requested output format=line_id,client
   requested output data type=integer,string
   command: import sys
 import re
-import calendar
-import time
-import gzip
+import datetime
 
-def process_file(file_path):
-    log_pattern = re.compile(
-        r'^([A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2})\s+(\S+)\s+(.+?):\s*(.*)$'
-    )
+def main():
+    if len(sys.argv) < 2:
+        return
+        
+    log_file = sys.argv[1]
     
-    latest_xid = {}
-    discover_times = {}
+    log_pattern = re.compile(r'^([A-Z][a-z]{2})\s+(\d+)\s+(\d{2}:\d{2}:\d{2})\s+(\S+)\s+([^:]+):\s+(.*)$')
+    proc_pattern = re.compile(r'^([^\[]+)(?:\[(\d+)\])?$')
     
-    open_func = gzip.open if file_path.endswith('.gz') else open
+    current_year = 2000
+    last_month = None
+    month_map = {"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+                 "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12}
     
-    with open_func(file_path, 'rt', encoding='utf-8', errors='replace') as f:
-        for line_idx, line in enumerate(f, 1):
-            match = log_pattern.match(line)
-            if not match:
+    latest_xid_by_stream = {}
+    last_discover_time_stream = {}
+    
+    with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+        for line_id, line in enumerate(f, 1):
+            m = log_pattern.match(line)
+            if not m:
                 continue
                 
-            ts_str, host, prog, msg = match.groups()
-            stream_id = prog.strip()
+            month_str, day_str, time_str, client, proc_str, msg = m.groups()
             
-            ts_norm = re.sub(r'\s+', ' ', ts_str)
-            try:
-                t = time.strptime("2000 " + ts_norm, "%Y %b %d %H:%M:%S")
-                current_ts = calendar.timegm(t)
-            except ValueError:
+            month = month_map.get(month_str)
+            if not month:
                 continue
+                
+            if last_month == 12 and month == 1:
+                current_year += 1
+            last_month = month
+            
+            day = int(day_str)
+            H, M, S = map(int, time_str.split(':'))
+            
+            ts = datetime.datetime(current_year, month, day, H, M, S).timestamp()
+            
+            proc_match = proc_pattern.match(proc_str)
+            proc_id = proc_match.group(2) if proc_match else None
+            
+            is_offer = bool(re.search(r'\bDHCPOFFER\b', msg))
+            is_discover = bool(re.search(r'\bDHCPDISCOVER\b', msg))
+            
+            event_type = None
+            if is_offer:
+                event_type = "DHCPOFFER"
+            elif is_discover:
+                event_type = "DHCPDISCOVER"
                 
             xid_match = re.search(r'\(xid=(0x[0-9a-fA-F]+)\)', msg)
-            if xid_match:
-                xid = xid_match.group(1)
-                latest_xid[(host, stream_id)] = xid
-            else:
-                xid = latest_xid.get((host, stream_id))
-                
-            if xid:
-                join_key = ('xid', host, xid)
-            else:
-                join_key = ('stream', host, stream_id)
-                
-            is_dhcpoffer = bool(re.search(r'\bDHCPOFFER\b', msg))
-            is_dhcpdiscover = bool(re.search(r'\bDHCPDISCOVER\b', msg))
+            transaction_id = xid_match.group(1) if xid_match else None
             
-            if is_dhcpdiscover:
-                discover_times[join_key] = current_ts
+            stream_key = (client, proc_id)
+            
+            if transaction_id is None:
+                transaction_id = latest_xid_by_stream.get(stream_key)
+            else:
+                latest_xid_by_stream[stream_key] = transaction_id
                 
-            if is_dhcpoffer:
-                last_disc = discover_times.get(join_key)
-                if last_disc is None or not (0 <= current_ts - last_disc <= 30):
-                    print(f"{line_idx} {host}")
+            interface_match = re.search(r'\bon\s+([a-zA-Z0-9_-]+)\b', msg)
+            interface = interface_match.group(1) if interface_match else None
+            
+            ip_match = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', msg)
+            ip = ip_match.group(0) if ip_match else None
+            
+            # Build explicit intermediate record for stateful logic
+            record = {
+                "event_type": event_type,
+                "timestamp": ts,
+                "client": client,
+                "host": client,
+                "process_id": proc_id,
+                "transaction_id": transaction_id,
+                "interface": interface,
+                "ip": ip
+            }
+            
+            txn_key = (client, transaction_id) if transaction_id else None
+            
+            if is_discover:
+                last_discover_time_stream[stream_key] = ts
+                
+            if is_offer:
+                last_time = last_discover_time_stream.get(stream_key)
+                if last_time is None or (ts - last_time) > 30:
+                    if client is not None:
+                        print(f"{line_id} {client}")
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1:
-        process_file(sys.argv[1])
-  precision=0.9412 recall=0.6957 f1=0.8000 TP=16 FP=1 FN=7 returned=17 must=23
-  may_precision=0.9412 may_recall=0.6957 may_f1=0.8000 may_TP=16 may_FP=1 may_FN=7 may=23
-  retries=0
-  input_tokens=20017 output_tokens=673
-  elapsed_seconds=176.91
+    main()
+  precision=0.1176 recall=1.0000 f1=0.2105 TP=2 FP=15 FN=0 returned=17 must=2
+  may_precision=0.1176 may_recall=1.0000 may_f1=0.2105 may_TP=2 may_FP=15 may_FN=0 may=2
+  retries=4
+  input_tokens=100217 output_tokens=4819
+  elapsed_seconds=858.84
 
 ID: multiline_12 | type: select | query: Identify ACK messages where no matching REQUEST from the same transaction occurred within the previous 30 seconds.
   requested output format=line_id,transaction_id
   requested output data type=integer,string
   command: import sys
 import re
-import gzip
-import time
-import calendar
+import datetime
 
 def main():
     if len(sys.argv) < 2:
         return
-    filepath = sys.argv[1]
+    file_path = sys.argv[1]
     
-    syslog_re = re.compile(
-        r'^([A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2})\s+'
-        r'(\S+)\s+'
-        r'(?:([^:\[\s]+)(?:\[(\d+)\])?:\s+)?'
-        r'(.*)$'
-    )
+    requests = []
     
-    req_re = re.compile(r'\bDHCPREQUEST\b')
-    ack_re = re.compile(r'\bDHCPACK\b')
-    xid_re = re.compile(r'\(xid=(0x[0-9a-fA-F]+)\)')
+    header_regex = re.compile(r'^([A-Z][a-z]{2})\s+(\d+)\s+(\d{2}:\d{2}:\d{2})\s+(\S+)\s+[^:\[]+(?:\[(\d+)\])?:\s+')
+    msg_regex = re.compile(r'(DHCPACK|DHCPREQUEST)(.*?)(?=<\d+>|$)')
+    xid_regex = re.compile(r'\(xid=(0x[a-fA-F0-9]+)\)')
     
-    last_req_xid = {}
-    last_req_pid = {}
-    
-    opener = gzip.open if filepath.endswith('.gz') else open
     try:
-        with opener(filepath, 'rt', encoding='utf-8', errors='replace') as f:
+        with open(file_path, 'r', errors='replace') as f:
             for line_idx, line in enumerate(f, 1):
-                m = syslog_re.match(line)
-                if not m:
+                if 'DHCPACK' not in line and 'DHCPREQUEST' not in line:
                     continue
-                
-                ts_str, host, process, pid, msg = m.groups()
-                
-                is_req = bool(req_re.search(msg))
-                is_ack = bool(ack_re.search(msg))
-                
-                if not is_req and not is_ack:
+                    
+                header_m = header_regex.match(line)
+                if not header_m:
                     continue
-                
-                ts_str_norm = re.sub(r'\s+', ' ', ts_str)
+                    
+                month, day, time_str, host, pid = header_m.groups()
+                ts_str = f"2000 {month} {day} {time_str}"
                 try:
-                    time_struct = time.strptime(f"2000 {ts_str_norm}", "%Y %b %d %H:%M:%S")
-                    ts = calendar.timegm(time_struct)
+                    dt = datetime.datetime.strptime(ts_str, "%Y %b %d %H:%M:%S")
+                    ts = dt.timestamp()
                 except ValueError:
                     continue
-                
-                xid_m = xid_re.search(msg)
-                xid = xid_m.group(1) if xid_m else None
-                
-                if is_req:
-                    if xid:
-                        last_req_xid[(host, xid)] = ts
-                    last_req_pid[(host, pid)] = (ts, xid)
-                
-                if is_ack:
-                    if not xid:
-                        continue
                     
-                    match_ts = None
-                    if (host, xid) in last_req_xid:
-                        match_ts = last_req_xid[(host, xid)]
-                    elif (host, pid) in last_req_pid:
-                        pid_ts, pid_req_xid = last_req_pid[(host, pid)]
-                        if pid_req_xid is None or pid_req_xid == xid:
-                            match_ts = pid_ts
-                            
-                    if match_ts is not None and 0 <= (ts - match_ts) <= 30:
-                        pass
-                    else:
-                        print(f"{line_idx} {xid}")
-    except Exception as e:
+                new_requests = []
+                for r in requests:
+                    diff = ts - r['ts']
+                    if -60 <= diff <= 60:
+                        new_requests.append(r)
+                requests = new_requests
+                
+                for m in msg_regex.finditer(line):
+                    msg_type = m.group(1)
+                    remainder = m.group(2)
+                    
+                    xid_match = xid_regex.search(remainder)
+                    xid = xid_match.group(1) if xid_match else None
+                    
+                    if msg_type == 'DHCPREQUEST':
+                        requests.append({'ts': ts, 'host': host, 'pid': pid, 'xid': xid})
+                    elif msg_type == 'DHCPACK':
+                        matched = False
+                        for req in reversed(requests):
+                            diff = ts - req['ts']
+                            if 0 <= diff <= 30:
+                                if req['host'] == host:
+                                    if req['xid'] is not None and xid is not None:
+                                        if req['xid'] == xid:
+                                            matched = True
+                                            break
+                                    else:
+                                        if req['pid'] is not None and pid is not None:
+                                            if req['pid'] == pid:
+                                                matched = True
+                                                break
+                                        else:
+                                            matched = True
+                                            break
+                        
+                        if not matched:
+                            if xid is not None:
+                                print(f"{line_idx} {xid}")
+    except Exception:
         pass
 
 if __name__ == '__main__':
@@ -959,8 +1066,8 @@ if __name__ == '__main__':
   precision=1.0000 recall=1.0000 f1=1.0000 TP=0 FP=0 FN=0 returned=0 must=0
   may_precision=1.0000 may_recall=1.0000 may_f1=1.0000 may_TP=0 may_FP=0 may_FN=0 may=0
   retries=0
-  input_tokens=19981 output_tokens=838
-  elapsed_seconds=169.65
+  input_tokens=20007 output_tokens=816
+  elapsed_seconds=163.57
 
 ID: multiline_13 | type: select | query: Identify invalid DHCP cycle transitions by hostname and transaction ID. If a DHCP message lacks a transaction ID, infer it from the latest transaction ID in the same process stream. Valid repeated cycles are DHCPDISCOVER -> DHCPOFFER -> DHCPREQUEST -> DHCPACK and DHCPREQUEST -> DHCPACK. Treat incomplete trailing sequences as allowed; only explicit bad transitions are violations.
   requested output format=client,transaction_id
@@ -968,741 +1075,924 @@ ID: multiline_13 | type: select | query: Identify invalid DHCP cycle transitions
   command: import sys
 import re
 import gzip
+from datetime import datetime
+from collections import defaultdict
 
 def main():
     if len(sys.argv) < 2:
         return
-        
-    filepath = sys.argv[1]
-    
-    # Matches <timestamp> <host> <process>[<pid>]: <message>
-    # Robustly handles varying timestamp formats by scanning for the host/process structure
-    log_pattern = re.compile(r'(?:^|\s)(\S+)\s+([^:\[\s]+)(?:\[(\d+)\])?:\s*(.*)')
-    
-    msg_regex = re.compile(r'\b(DHCPDISCOVER|DHCPOFFER|DHCPREQUEST|DHCPACK)\b')
-    xid_regex = re.compile(r'xid=(0x[0-9a-fA-F]+)')
-    
-    latest_xid = {}
-    client_states = {}
-    
-    # Valid transitions within the same transaction cycle
-    allowed_transitions = {
-        'DHCPDISCOVER': {'DHCPOFFER'},
-        'DHCPOFFER': {'DHCPREQUEST'},
-        'DHCPREQUEST': {'DHCPACK'},
-        'DHCPACK': {'DHCPDISCOVER', 'DHCPREQUEST'}
+    file_path = sys.argv[1]
+
+    # Syslog format: Month Day Time Host Proc[PID]: Msg
+    syslog_re = re.compile(
+        r'^(?P<month>[A-Z][a-z]{2})\s+'
+        r'(?P<day>\d+)\s+'
+        r'(?P<time>\d{2}:\d{2}:\d{2})\s+'
+        r'(?P<host>\S+)\s+'
+        r'(?P<proc>[^:\[\]\s]+)(?:\[(?P<pid>\d+)\])?:\s+'
+        r'(?P<msg>.*)$'
+    )
+
+    event_re = re.compile(r'\b(DHCPDISCOVER|DHCPOFFER|DHCPREQUEST|DHCPACK)\b')
+    xid_re = re.compile(r'xid=(0x[0-9a-fA-F]+)')
+
+    months = {
+        'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
+        'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12
     }
+
+    open_func = gzip.open if file_path.endswith('.gz') else open
     
-    ordered_violations = []
-    seen_violations = set()
-    
-    opener = gzip.open if filepath.endswith('.gz') else open
-    
-    with opener(filepath, 'rt', encoding='utf-8', errors='replace') as f:
-        for line in f:
-            m = log_pattern.search(line)
+    events = []
+    latest_xid = {}  # Map (host, proc, pid) -> xid
+
+    with open_func(file_path, 'rt', encoding='utf-8', errors='replace') as f:
+        for line_num, line in enumerate(f):
+            m = syslog_re.match(line)
             if not m:
                 continue
                 
-            host, process, pid, content = m.groups()
+            host = m.group('host')
+            proc = m.group('proc')
+            pid = m.group('pid')
+            msg = m.group('msg')
             
-            xid_matches = list(xid_regex.finditer(content))
-            msg_matches = list(msg_regex.finditer(content))
-            
-            if not msg_matches and not xid_matches:
-                continue
-            
-            # Track the most recent XID seen in this process stream
-            if xid_matches:
-                latest_xid[(host, pid)] = xid_matches[-1].group(1)
+            xid_m = xid_re.search(msg)
+            if xid_m:
+                xid = xid_m.group(1)
+                latest_xid[(host, proc, pid)] = xid
+            else:
+                xid = latest_xid.get((host, proc, pid))
                 
-            for msg_m in msg_matches:
-                msg_type = msg_m.group(1)
-                msg_pos = msg_m.start()
-                
-                associated_xid = None
-                # Prefer the first XID that appears after this message on the same line
-                for xid_m in xid_matches:
-                    if xid_m.start() > msg_pos:
-                        associated_xid = xid_m.group(1)
-                        break
-                
-                # Fallback to the last XID on the line
-                if not associated_xid and xid_matches:
-                    associated_xid = xid_matches[-1].group(1)
-                
-                # Fallback to the stream's latest known XID
-                if not associated_xid:
-                    associated_xid = latest_xid.get((host, pid))
+            ev_matches = event_re.findall(msg)
+            if ev_matches and xid:
+                mo = months.get(m.group('month'), 1)
+                dy = int(m.group('day'))
+                hr, mn, sc = map(int, m.group('time').split(':'))
+                try:
+                    # Assign year 2000 as per instructions to not assume rollover
+                    dt = datetime(2000, mo, dy, hr, mn, sc)
+                    ts = int(dt.timestamp())
+                except ValueError:
+                    ts = 0
                     
-                if not associated_xid:
-                    continue
-                    
-                key = (host, associated_xid)
-                last_state = client_states.get(key)
-                
-                if last_state and msg_type != last_state:
-                    if msg_type not in allowed_transitions[last_state]:
-                        if key not in seen_violations:
-                            seen_violations.add(key)
-                            ordered_violations.append(key)
-                
-                client_states[key] = msg_type
+                for ev in ev_matches:
+                    events.append({
+                        'host': host,
+                        'xid': xid,
+                        'ts': ts,
+                        'line_num': line_num,
+                        'event': ev
+                    })
 
-    for host, xid in ordered_violations:
+    transactions = defaultdict(list)
+    for ev in events:
+        transactions[(ev['host'], ev['xid'])].append(ev)
+        
+    valid_transitions = {
+        ('DHCPDISCOVER', 'DHCPOFFER'),
+        ('DHCPOFFER', 'DHCPREQUEST'),
+        ('DHCPREQUEST', 'DHCPACK'),
+        ('DHCPACK', 'DHCPDISCOVER'),
+        ('DHCPACK', 'DHCPREQUEST')
+    }
+    
+    violations = set()
+    
+    for (host, xid), ev_list in transactions.items():
+        ev_list.sort(key=lambda x: (x['ts'], x['line_num']))
+        
+        last_event = None
+        for ev in ev_list:
+            curr_event = ev['event']
+            # Only explicit bad transitions between different states are violations
+            if last_event and last_event != curr_event:
+                if (last_event, curr_event) not in valid_transitions:
+                    violations.add((host, xid))
+                    break
+            last_event = curr_event
+            
+    for host, xid in sorted(violations):
         print(f"{host} {xid}")
 
 if __name__ == '__main__':
     main()
-  precision=0.0000 recall=0.0000 f1=0.0000 TP=0 FP=1243 FN=5849 returned=1243 must=5849
-  may_precision=0.0000 may_recall=0.0000 may_f1=0.0000 may_TP=0 may_FP=1243 may_FN=5849 may=5849
+  precision=0.9982 recall=0.1930 f1=0.3235 TP=1129 FP=2 FN=4720 returned=1131 must=5849
+  may_precision=0.9982 may_recall=0.1930 may_f1=0.3235 may_TP=1129 may_FP=2 may_FN=4720 may=5849
   retries=0
-  input_tokens=20029 output_tokens=929
-  elapsed_seconds=214.09
+  input_tokens=20051 output_tokens=1172
+  elapsed_seconds=168.54
 
 ID: multiline_14 | type: select | query: Identify transactions where two or more REQUEST messages occur before the first ACK.
   requested output format=transaction_id
   requested output data type=string
   command: import sys
 import re
-import gzip
 
-def process_logs():
-    if len(sys.argv) < 2:
-        return
-    filepath = sys.argv[1]
+def process_logs(file_path):
+    log_re = re.compile(r'^[A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+(?P<host>\S+)\s+dhclient(?:\[(?P<pid>\d+)\])?:?\s+(?P<message>.*)')
     
-    # Match syslog header and dhclient message body
-    line_re = re.compile(r'^[A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+(\S+)\s+dhclient(?:\[(\d+)\])?:\s+(.*)')
-    # Extract transaction ID if present
-    xid_re = re.compile(r'xid=(0x[0-9a-fA-F]+)', re.IGNORECASE)
-    # Match relevant DHCP events in order
-    event_re = re.compile(r'\b(DHCPDISCOVER|DHCPREQUEST|DHCPACK)\b')
-    
-    class Transaction:
-        __slots__ = ['xid', 'reqs', 'acks', 'emitted']
-        def __init__(self, xid):
-            self.xid = xid
-            self.reqs = 0
-            self.acks = 0
-            self.emitted = False
+    xid_re = re.compile(r'xid=(0x[0-9a-fA-F]+)')
+    req_re = re.compile(r'\bDHCPREQUEST on\b')
+    ack_re = re.compile(r'\bDHCPACK from\b')
+    nak_re = re.compile(r'\bDHCPNAK from\b')
+    discover_re = re.compile(r'\bDHCPDISCOVER on\b')
+    decline_re = re.compile(r'\bDHCPDECLINE on\b')
+    release_re = re.compile(r'\bDHCPRELEASE on\b')
 
-    # State storage
-    xid_states = {}          # Key: (host, xid)
-    pid_states = {}          # Key: (host, pid) - Fallback for messages lacking xid
-    active_xid_by_pid = {}   # Inference mapping: (host, pid) -> last seen xid
+    class TxState:
+        def __init__(self):
+            self.req_count = 0
+            self.ack_seen = False
+            self.reported = False
+            self.should_report = False
+            self.xid = None
+            self.is_finished = False
 
-    opener = gzip.open if filepath.endswith('.gz') else open
-    
+    states = {}
+    host_pid_to_key = {}
+
+    def get_state(host, pid, xid):
+        hp_key = (host, pid) if pid else (host, None)
+        
+        if xid:
+            key = (host, xid)
+            if key not in states:
+                new_state = TxState()
+                new_state.xid = xid
+                states[key] = new_state
+                
+                if hp_key in states and not states[hp_key].is_finished:
+                    old_state = states[hp_key]
+                    if old_state.req_count > 0:
+                        new_state.req_count += old_state.req_count
+                        if new_state.req_count >= 2 and not new_state.ack_seen:
+                            new_state.should_report = True
+                        new_state.reported = new_state.reported or old_state.reported
+                        new_state.should_report = new_state.should_report or old_state.should_report
+                    states[hp_key] = TxState()
+                    
+            if hp_key[1] is not None:
+                host_pid_to_key[hp_key] = key
+            return states[key]
+        else:
+            if hp_key[1] is not None and hp_key in host_pid_to_key:
+                active_key = host_pid_to_key[hp_key]
+                if states[active_key].is_finished:
+                    del host_pid_to_key[hp_key]
+                    states[hp_key] = TxState()
+                    return states[hp_key]
+                else:
+                    return states[active_key]
+            else:
+                if hp_key not in states or states[hp_key].is_finished:
+                    states[hp_key] = TxState()
+                return states[hp_key]
+
     try:
-        with opener(filepath, 'rt', errors='replace') as f:
+        import gzip
+        open_func = gzip.open if file_path.endswith('.gz') else open
+        with open_func(file_path, 'rt', encoding='utf-8', errors='replace') as f:
             for line in f:
-                m = line_re.match(line)
+                m = log_re.match(line)
                 if not m:
                     continue
-                    
-                host = m.group(1)
-                pid = m.group(2) if m.group(2) else None
-                msg = m.group(3)
                 
-                events = event_re.findall(msg)
+                host = m.group('host')
+                pid = m.group('pid')
+                msg = m.group('message')
+                
+                xid_match = xid_re.search(msg)
+                xid = xid_match.group(1) if xid_match else None
+                
+                events = []
+                for mm in req_re.finditer(msg): events.append((mm.start(), 'REQ'))
+                for mm in ack_re.finditer(msg): events.append((mm.start(), 'ACK'))
+                for mm in nak_re.finditer(msg): events.append((mm.start(), 'NAK'))
+                for mm in discover_re.finditer(msg): events.append((mm.start(), 'DISCOVER'))
+                for mm in decline_re.finditer(msg): events.append((mm.start(), 'DECLINE'))
+                for mm in release_re.finditer(msg): events.append((mm.start(), 'RELEASE'))
+                
                 if not events:
                     continue
                     
-                x_m = xid_re.search(msg)
-                line_xid = x_m.group(1) if x_m else None
+                events.sort()
                 
-                for ev in events:
-                    is_discover = (ev == 'DHCPDISCOVER')
-                    is_req = (ev == 'DHCPREQUEST')
-                    is_ack = (ev == 'DHCPACK')
-                    
-                    xid = line_xid
-                    if not xid:
-                        if not is_discover:
-                            # Infer missing transaction ID from previous mappings
-                            xid = active_xid_by_pid.get((host, pid))
-                        else:
-                            # A DISCOVER lacking an xid resets any ongoing inference
-                            active_xid_by_pid.pop((host, pid), None)
-                    else:
-                        active_xid_by_pid[(host, pid)] = xid
+                state = get_state(host, pid, xid)
+                
+                for _, ev_type in events:
+                    if ev_type == 'REQ':
+                        if not state.ack_seen:
+                            state.req_count += 1
+                            if state.req_count >= 2:
+                                state.should_report = True
+                    elif ev_type == 'ACK':
+                        state.ack_seen = True
+                        state.is_finished = True
+                    elif ev_type in ('NAK', 'DECLINE', 'RELEASE'):
+                        state.is_finished = True
+                    elif ev_type == 'DISCOVER':
+                        state.req_count = 0
+                        state.ack_seen = False
+                        state.reported = False
+                        state.should_report = False
+                        state.is_finished = False
                         
-                    tx = None
-                    if xid:
-                        state_key = (host, xid)
-                        if state_key not in xid_states:
-                            # Try to upgrade an existing fallback state if unambiguous
-                            if (host, pid) in pid_states:
-                                tx = pid_states.pop((host, pid))
-                                tx.xid = xid
-                                xid_states[state_key] = tx
-                            else:
-                                tx = Transaction(xid)
-                                xid_states[state_key] = tx
-                        else:
-                            tx = xid_states[state_key]
-                            # Cleanup stale fallback tracking
-                            pid_states.pop((host, pid), None)
-                    else:
-                        state_key = (host, pid)
-                        if state_key not in pid_states:
-                            tx = Transaction(None)
-                            pid_states[state_key] = tx
-                        else:
-                            tx = pid_states[state_key]
-                            
-                    # Detect transaction boundaries to reset counters
-                    is_new_tx = False
-                    if is_discover:
-                        is_new_tx = True
-                    elif is_req and tx.acks > 0:
-                        # A new request after a successful transaction denotes a renewal/new cycle
-                        is_new_tx = True
-                        
-                    if is_new_tx:
-                        tx.reqs = 0
-                        tx.acks = 0
-                        tx.emitted = False
-                        
-                    # State transitions
-                    if is_req:
-                        if tx.acks == 0:
-                            tx.reqs += 1
-                    elif is_ack:
-                        tx.acks += 1
-                        
-                    # Condition: two or more REQUEST messages occur before the first ACK
-                    if tx.reqs >= 2 and not tx.emitted and tx.xid:
-                        print(tx.xid)
-                        tx.emitted = True
+                if state.should_report and not state.reported and state.xid:
+                    print(state.xid)
+                    state.reported = True
 
-    except IOError:
+    except Exception:
         pass
 
 if __name__ == '__main__':
-    process_logs()
-  precision=0.8487 recall=1.0000 f1=0.9182 TP=505 FP=90 FN=0 returned=595 must=505
-  may_precision=0.8487 may_recall=1.0000 may_f1=0.9182 may_TP=505 may_FP=90 may_FN=0 may=505
-  retries=0
-  input_tokens=19963 output_tokens=1251
-  elapsed_seconds=206.24
+    if len(sys.argv) > 1:
+        process_logs(sys.argv[1])
+  precision=0.9961 recall=1.0000 f1=0.9980 TP=505 FP=2 FN=0 returned=507 must=505
+  may_precision=0.9961 may_recall=1.0000 may_f1=0.9980 may_TP=505 may_FP=2 may_FN=0 may=505
+  retries=1
+  input_tokens=39959 output_tokens=2315
+  elapsed_seconds=275.85
 
 ID: multiline_15 | type: select | query: For completed transactions, calculate the time difference in seconds between the REQUEST and the ACK. List transactions where this latency exceeds 5 seconds.
   requested output format=transaction_id,request_to_ack_latency_seconds
   requested output data type=string,float
   command: import sys
 import re
+import datetime
+import argparse
 import gzip
-from datetime import datetime
 
-def run():
-    line_pattern = re.compile(
-        r'^(?P<month>[A-Z][a-z]{2})\s+(?P<day>\d+)\s+(?P<time>\d{2}:\d{2}:\d{2})\s+'
-        r'(?P<host>\S+)\s+(?P<process>[a-zA-Z0-9_.-]+)(?:\[(?P<pid>\d+)\])?:\s+(?P<message>.*)$'
+def process_logs(file_path):
+    # Regex to match the standard syslog header
+    line_re = re.compile(
+        r"^(?P<month>[A-Z][a-z]{2})\s+(?P<day>\d+)\s+(?P<time>\d{2}:\d{2}:\d{2})\s+(?P<host>\S+)\s+(?P<process>[^:]+):\s+(?P<msg>.*)$"
     )
-    xid_pattern = re.compile(r'\(xid=(0x[0-9a-fA-F]+)\)')
-
-    requests = {}
-    host_pid_to_xid = {}
-
-    if len(sys.argv) < 2:
-        return
-        
-    filepath = sys.argv[1]
-    opener = gzip.open if filepath.endswith('.gz') else open
+    xid_re = re.compile(r"\(xid=(0x[0-9a-fA-F]+)\)")
     
+    requests_by_xid = {}
+    requests_by_pid = {}
+    
+    opener = gzip.open if file_path.endswith('.gz') else open
+
     try:
-        with opener(filepath, 'rt', encoding='utf-8', errors='replace') as f:
+        with opener(file_path, 'rt', encoding='utf-8', errors='replace') as f:
             for line in f:
-                m = line_pattern.match(line)
+                m = line_re.match(line)
                 if not m:
                     continue
-                d = m.groupdict()
-                host = d['host']
-                pid = d['pid']
-                msg = d['message']
-                
-                is_req = 'DHCPREQUEST' in msg
-                is_ack = 'DHCPACK' in msg
-                
-                if not (is_req or is_ack):
-                    continue
                     
-                day_padded = d['day'].zfill(2)
-                time_str = f"2000 {d['month']} {day_padded} {d['time']}"
+                month = m.group('month')
+                day = m.group('day')
+                time_str = m.group('time')
+                host = m.group('host')
+                process = m.group('process')
+                msg = m.group('msg')
+                
+                pid = None
+                if '[' in process and ']' in process:
+                    pid_str = process.split('[')[1].split(']')[0]
+                    if pid_str.isdigit():
+                        pid = pid_str
+                
                 try:
-                    ts = datetime.strptime(time_str, "%Y %b %d %H:%M:%S").timestamp()
+                    # Parse timestamp assuming year 2000 as per instructions
+                    dt = datetime.datetime.strptime(f"2000 {month} {day} {time_str}", "%Y %b %d %H:%M:%S")
+                    ts = dt.timestamp()
                 except ValueError:
                     continue
                 
-                x_m = xid_pattern.search(msg)
-                xid = x_m.group(1) if x_m else None
-                
-                if xid and pid:
-                    host_pid_to_xid[(host, pid)] = xid
+                # Find REQUEST or ACK events, respecting embedded syslog boundaries '<...>' 
+                for event_match in re.finditer(r"(DHCPREQUEST|DHCPACK)\b[^\<]*", msg):
+                    event_str = event_match.group(0)
+                    x_m = xid_re.search(event_str)
+                    xid = x_m.group(1) if x_m else None
                     
-                current_xid = xid
-                if not current_xid and pid:
-                    current_xid = host_pid_to_xid.get((host, pid))
-                    
-                if not current_xid:
-                    continue
-                    
-                key = (host, current_xid)
-                
-                if is_req:
-                    if key not in requests:
-                        requests[key] = ts
+                    if event_str.startswith("DHCPREQUEST"):
+                        if xid:
+                            if (host, xid) not in requests_by_xid:
+                                requests_by_xid[(host, xid)] = ts
+                        if pid:
+                            if (host, pid) not in requests_by_pid:
+                                requests_by_pid[(host, pid)] = (ts, xid)
+                            else:
+                                old_ts, old_xid = requests_by_pid[(host, pid)]
+                                if xid is not None and old_xid == xid:
+                                    pass
+                                else:
+                                    requests_by_pid[(host, pid)] = (ts, xid)
+                                    
+                    elif event_str.startswith("DHCPACK"):
+                        req_ts = None
+                        matched_xid = None
                         
-                if is_ack:
-                    if key in requests:
-                        latency = ts - requests[key]
-                        if latency > 5.0:
-                            print(f"{current_xid} {latency}")
-                        del requests[key]
-                        if pid and (host, pid) in host_pid_to_xid:
-                            if host_pid_to_xid[(host, pid)] == current_xid:
-                                del host_pid_to_xid[(host, pid)]
-    except Exception:
+                        if xid:
+                            if (host, xid) in requests_by_xid:
+                                req_ts = requests_by_xid[(host, xid)]
+                                matched_xid = xid
+                            elif pid and (host, pid) in requests_by_pid:
+                                p_ts, prev_xid = requests_by_pid[(host, pid)]
+                                if prev_xid is None or prev_xid == xid:
+                                    req_ts = p_ts
+                                    matched_xid = xid
+                        else:
+                            if pid and (host, pid) in requests_by_pid:
+                                p_ts, prev_xid = requests_by_pid[(host, pid)]
+                                if prev_xid:
+                                    req_ts = p_ts
+                                    matched_xid = prev_xid
+                                    
+                        if req_ts is not None and matched_xid is not None:
+                            latency = ts - req_ts
+                            if latency > 5.0:
+                                print(f"{matched_xid} {latency}")
+                            # Clean up completed transactions
+                            if (host, matched_xid) in requests_by_xid:
+                                del requests_by_xid[(host, matched_xid)]
+                            if (host, pid) in requests_by_pid:
+                                del requests_by_pid[(host, pid)]
+    except IOError:
         pass
 
-if __name__ == '__main__':
-    run()
-  precision=0.9879 recall=1.0000 f1=0.9939 TP=163 FP=2 FN=0 returned=165 must=163
-  may_precision=0.9879 may_recall=1.0000 may_f1=0.9939 may_TP=163 may_FP=2 may_FN=0 may=163
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("file_path", help="Path to the log file")
+    args = parser.parse_args()
+    process_logs(args.file_path)
+  precision=1.0000 recall=1.0000 f1=1.0000 TP=163 FP=0 FN=0 returned=163 must=163
+  may_precision=1.0000 may_recall=1.0000 may_f1=1.0000 may_TP=163 may_FP=0 may_FN=0 may=163
   retries=0
-  input_tokens=20000 output_tokens=823
-  elapsed_seconds=143.94
+  input_tokens=20000 output_tokens=1236
+  elapsed_seconds=122.42
 
 ID: multiline_16 | type: select | query: Identify transactions (same client and transaction ID) where two or more DISCOVER messages occur within 60 seconds and no OFFER is present.
   requested output format=client,transaction_id
   requested output data type=string,string
   command: import sys
 import re
-import datetime
-import gzip
+import time
 
 def main():
     if len(sys.argv) < 2:
         return
-        
-    line_re = re.compile(
-        r"^(?P<month>[A-Z][a-z]{2})\s+"
-        r"(?P<day>\d+)\s+"
-        r"(?P<time>\d{2}:\d{2}:\d{2})\s+"
-        r"(?P<host>\S+)\s+"
-        r"dhclient(?:\[(?P<pid>\d+)\])?:\s+"
-        r"(?P<msg>.*)$"
-    )
-    
-    xid_re = re.compile(r"\(xid=(0x[0-9a-fA-F]+)\)")
-    
-    active_txid = {}
-    transactions = {}
-    
-    file_path = sys.argv[1]
-    open_func = gzip.open if file_path.endswith('.gz') else open
-    
-    with open_func(file_path, 'rt', encoding='utf-8', errors='ignore') as f:
-        for line in f:
-            m = line_re.match(line)
-            if not m:
-                continue
-                
-            host = m.group('host')
-            pid = m.group('pid')
-            msg = m.group('msg').strip()
-            
-            is_discover = msg.startswith("DHCPDISCOVER")
-            is_offer = msg.startswith("DHCPOFFER")
-            
-            if not (is_discover or is_offer):
-                continue
-                
-            month = m.group('month')
-            day = m.group('day')
-            time_str = m.group('time')
-            
-            date_str = f"2000 {month} {day:>02} {time_str}"
-            try:
-                dt = datetime.datetime.strptime(date_str, "%Y %b %d %H:%M:%S")
-                ts = dt.timestamp()
-            except ValueError:
-                continue
-                
-            host_pid = (host, pid)
-            
-            xid_match = xid_re.search(msg)
-            xid = xid_match.group(1) if xid_match else None
-            
-            if is_discover:
-                if xid:
-                    active_txid[host_pid] = xid
-                else:
-                    xid = active_txid.get(host_pid)
-                    
-                if xid:
-                    key = (host, xid)
-                    if key not in transactions:
-                        transactions[key] = {'discovers': [], 'has_offer': False}
-                    transactions[key]['discovers'].append(ts)
-                    
-            elif is_offer:
-                if not xid:
-                    xid = active_txid.get(host_pid)
-                    
-                if xid:
-                    key = (host, xid)
-                    if key not in transactions:
-                        transactions[key] = {'discovers': [], 'has_offer': False}
-                    transactions[key]['has_offer'] = True
 
-    for (host, xid), data in transactions.items():
+    log_pattern = re.compile(r'^([A-Z][a-z]{2}\s+\d+\s\d{2}:\d{2}:\d{2})\s+(\S+)\s+dhclient(?:\[(\d+)\])?:\s+(.*)')
+    xid_pattern = re.compile(r'\(xid=(0x[0-9a-fA-F]+)\)')
+
+    groups = {}
+
+    try:
+        with open(sys.argv[1], 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                m = log_pattern.match(line)
+                if not m:
+                    continue
+                
+                ts_str = m.group(1)
+                client = m.group(2)
+                pid = m.group(3)
+                msg = m.group(4)
+
+                ts_str_clean = re.sub(r'\s+', ' ', ts_str)
+                try:
+                    t = time.strptime("2000 " + ts_str_clean, "%Y %b %d %H:%M:%S")
+                    ts = int(time.mktime(t))
+                except ValueError:
+                    continue
+
+                x_m = xid_pattern.search(msg)
+                xid = x_m.group(1) if x_m else None
+
+                msg_type = None
+                if 'DHCPDISCOVER' in msg:
+                    msg_type = 'DISCOVER'
+                elif 'DHCPOFFER' in msg:
+                    msg_type = 'OFFER'
+                else:
+                    msg_type = 'OTHER'
+
+                if msg_type == 'OTHER' and not xid:
+                    continue
+
+                key = (client, pid)
+                if key not in groups:
+                    groups[key] = []
+                groups[key].append({
+                    'ts': ts,
+                    'type': msg_type,
+                    'xid': xid
+                })
+    except Exception:
+        pass
+
+    transactions = {}
+
+    for (client, pid), msgs in groups.items():
+        for i, m in enumerate(msgs):
+            if m['xid'] is not None:
+                continue
+
+            best_xid = None
+            min_diff = float('inf')
+
+            for j in range(i-1, -1, -1):
+                if msgs[j]['xid'] is not None:
+                    diff = abs(m['ts'] - msgs[j]['ts'])
+                    if diff < min_diff:
+                        min_diff = diff
+                        best_xid = msgs[j]['xid']
+                    break
+
+            for j in range(i+1, len(msgs)):
+                if msgs[j]['xid'] is not None:
+                    diff = abs(msgs[j]['ts'] - m['ts'])
+                    if diff < min_diff:
+                        min_diff = diff
+                        best_xid = msgs[j]['xid']
+                    break
+
+            if min_diff <= 60:
+                m['xid'] = best_xid
+
+        for m in msgs:
+            xid = m['xid']
+            if not xid:
+                continue
+
+            t_key = (client, xid)
+            if t_key not in transactions:
+                transactions[t_key] = {'discovers': [], 'has_offer': False}
+
+            if m['type'] == 'DISCOVER':
+                transactions[t_key]['discovers'].append(m['ts'])
+            elif m['type'] == 'OFFER':
+                transactions[t_key]['has_offer'] = True
+
+    for (client, xid), data in transactions.items():
         if data['has_offer']:
             continue
-            
+
         discovers = sorted(data['discovers'])
-        
         found = False
         for i in range(len(discovers) - 1):
-            if discovers[i+1] - discovers[i] <= 60.0:
+            if discovers[i+1] - discovers[i] <= 60:
                 found = True
                 break
-                
+
         if found:
-            print(f"{host} {xid}")
+            print(f"{client} {xid}")
 
 if __name__ == '__main__':
     main()
-  precision=1.0000 recall=1.0000 f1=1.0000 TP=4280 FP=0 FN=0 returned=4280 must=4280
-  may_precision=1.0000 may_recall=1.0000 may_f1=1.0000 may_TP=4280 may_FP=0 may_FN=0 may=4280
-  retries=1
-  input_tokens=40003 output_tokens=1899
-  elapsed_seconds=231.43
+  precision=0.9993 recall=0.7096 f1=0.8299 TP=3037 FP=2 FN=1243 returned=3039 must=4280
+  may_precision=0.9993 may_recall=0.7096 may_f1=0.8299 may_TP=3037 may_FP=2 may_FN=1243 may=4280
+  retries=0
+  input_tokens=19985 output_tokens=1102
+  elapsed_seconds=149.68
 
 ID: multiline_17 | type: select | query: Identify DHCP exchanges where the client received at least two OFFERs from different servers before getting an ACK. Return the client hostname, process id, transaction id, timestamp of the event, list of server ips, and ACKed server for each instance.
   requested output format=client,process_id,transaction_id,ack_timestamp,offer_server_ips,ack_server_ip
   requested output data type=string,integer,string,float,array[string],string
-  ERROR: __EVAL_ERROR__: timeout expired
-  precision=0.0 recall=0.0 f1=0.0 TP=0 FP=0 FN=0
-  may_precision=0.0 may_recall=0.0 may_f1=0.0 may_TP=0 may_FP=0 may_FN=0
-  retries=unknown
+  command: import sys
+import re
+import json
+import gzip
+from datetime import datetime
+
+def get_open_fn(filepath):
+    with open(filepath, 'rb') as f:
+        header = f.read(2)
+    if header == b'\x1f\x8b':
+        return gzip.open
+    return open
+
+def process_logs(filepath):
+    log_pattern = re.compile(
+        r'^(?P<month>[A-Z][a-z]{2})\s+(?P<day>\d+)\s+(?P<time>\d{2}:\d{2}:\d{2})\s+(?P<host>\S+)\s+(?P<process>[a-zA-Z0-9_\-]+)(?:\[(?P<pid>\d+)\])?:\s+(?P<msg>.*)$'
+    )
+    
+    class Transaction:
+        def __init__(self, client):
+            self.client = client
+            self.pids = set()
+            self.xid = None
+            self.offers = []
+
+    by_pid = {}
+    by_xid = {}
+    
+    open_fn = get_open_fn(filepath)
+    with open_fn(filepath, 'rt', encoding='utf-8', errors='replace') as f:
+        for line in f:
+            match = log_pattern.match(line)
+            if not match:
+                continue
+            
+            d = match.groupdict()
+            month = d['month']
+            day = d['day']
+            time_str = d['time']
+            client = d['host']
+            msg_pid = d['pid']
+            msg = d['msg']
+            
+            xid_match = re.search(r'\(xid=(0x[0-9a-fA-F]+)\)', msg)
+            msg_xid = xid_match.group(1) if xid_match else None
+            
+            txn = None
+            if msg_xid and msg_pid:
+                if (client, msg_xid) in by_xid:
+                    txn = by_xid[(client, msg_xid)]
+                    if msg_pid not in txn.pids:
+                        txn.pids.add(msg_pid)
+                        by_pid[(client, msg_pid)] = txn
+                elif (client, msg_pid) in by_pid:
+                    txn = by_pid[(client, msg_pid)]
+                    if txn.xid and txn.xid != msg_xid:
+                        txn = Transaction(client)
+                        txn.xid = msg_xid
+                        txn.pids.add(msg_pid)
+                        by_xid[(client, msg_xid)] = txn
+                        by_pid[(client, msg_pid)] = txn
+                    else:
+                        txn.xid = msg_xid
+                        by_xid[(client, msg_xid)] = txn
+                else:
+                    txn = Transaction(client)
+                    txn.xid = msg_xid
+                    txn.pids.add(msg_pid)
+                    by_xid[(client, msg_xid)] = txn
+                    by_pid[(client, msg_pid)] = txn
+            elif msg_xid:
+                if (client, msg_xid) in by_xid:
+                    txn = by_xid[(client, msg_xid)]
+                else:
+                    txn = Transaction(client)
+                    txn.xid = msg_xid
+                    by_xid[(client, msg_xid)] = txn
+            elif msg_pid:
+                if (client, msg_pid) in by_pid:
+                    txn = by_pid[(client, msg_pid)]
+                else:
+                    txn = Transaction(client)
+                    txn.pids.add(msg_pid)
+                    by_pid[(client, msg_pid)] = txn
+            else:
+                active_for_client = {}
+                for (c, x), t in by_xid.items():
+                    if c == client:
+                        active_for_client[id(t)] = t
+                for (c, p), t in by_pid.items():
+                    if c == client:
+                        active_for_client[id(t)] = t
+                
+                if len(active_for_client) == 1:
+                    txn = list(active_for_client.values())[0]
+                else:
+                    txn = Transaction(client)
+            
+            if 'DHCPDISCOVER' in msg:
+                txn.offers = []
+            elif 'DHCPOFFER from ' in msg:
+                ip_match = re.search(r'DHCPOFFER from ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)', msg)
+                if ip_match:
+                    ip = ip_match.group(1)
+                    if ip not in txn.offers:
+                        txn.offers.append(ip)
+            elif 'DHCPACK from ' in msg:
+                ip_match = re.search(r'DHCPACK from ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)', msg)
+                if ip_match:
+                    ack_ip = ip_match.group(1)
+                    if len(txn.offers) >= 2 and txn.xid and txn.pids:
+                        process_id = int(list(txn.pids)[0])
+                        transaction_id = txn.xid
+                        dt_str = f"2000 {month} {day} {time_str}"
+                        dt = datetime.strptime(dt_str, "%Y %b %d %H:%M:%S")
+                        ack_timestamp = float(dt.timestamp())
+                        
+                        offers_str = json.dumps(txn.offers).replace(" ", "")
+                        print(f"{client} {process_id} {transaction_id} {ack_timestamp} {offers_str} {ack_ip}")
+                
+                if txn.xid and (client, txn.xid) in by_xid:
+                    del by_xid[(client, txn.xid)]
+                for p in list(txn.pids):
+                    if (client, p) in by_pid:
+                        del by_pid[(client, p)]
+                        
+            elif 'DHCPNAK' in msg or 'DHCPDECLINE' in msg:
+                if txn.xid and (client, txn.xid) in by_xid:
+                    del by_xid[(client, txn.xid)]
+                for p in list(txn.pids):
+                    if (client, p) in by_pid:
+                        del by_pid[(client, p)]
+
+if __name__ == '__main__':
+    if len(sys.argv) > 1:
+        process_logs(sys.argv[1])
+  precision=1.0000 recall=1.0000 f1=1.0000 TP=0 FP=0 FN=0 returned=0 must=0
+  may_precision=1.0000 may_recall=1.0000 may_f1=1.0000 may_TP=0 may_FP=0 may_FN=0 may=0
+  retries=1
+  input_tokens=40249 output_tokens=3147
+  elapsed_seconds=387.0
 
 ID: multiline_18 | type: select | query: Are there any cases where two different clients were assigned the same IP address at exactly the same timestamp?
   requested output format=assigned_ip,timestamp,clients
   requested output data type=string,float,array[string]
   command: import sys
 import re
-import datetime
+import time
 import json
 
-def get_timestamp(month, day, time_str):
-    time_fmt = f"2000 {month} {day:>2} {time_str}"
-    dt = datetime.datetime.strptime(time_fmt, "%Y %b %d %H:%M:%S")
-    return dt.timestamp()
+# Regex to parse the standard syslog format used by dhclient
+# e.g., 'Mar 10 00:01:48 puma25 dhclient[11386]: bound to 10.35.160.59 -- renewal in 21259 seconds.'
+log_pattern = re.compile(r'^([A-Z][a-z]{2})\s+(\d+)\s+(\d{2}:\d{2}:\d{2})\s+(\S+)\s+dhclient(?:\[\d+\])?:\s+(.*)$')
 
-def main():
-    if len(sys.argv) < 2:
-        return
-        
-    syslog_regex = re.compile(r'^([A-Z][a-z]{2})\s+(\d+)\s+(\d{2}:\d{2}:\d{2})\s+(\S+)\s+(.*)')
-    bound_regex = re.compile(r'bound to\s+([0-9a-fA-F\.\:]+)\s+--')
-    
-    assignments = {} 
-    
-    with open(sys.argv[1], 'r', encoding='utf-8', errors='replace') as f:
-        for line in f:
-            sys_m = syslog_regex.search(line)
-            if not sys_m:
-                continue
-            month, day, time_str, host, msg = sys_m.groups()
-            
-            bound_m = bound_regex.search(msg)
-            if bound_m:
-                ip = bound_m.group(1)
-                ts = get_timestamp(month, day, time_str)
-                key = (ts, ip)
+# Regex to extract the assigned IP address from a 'bound to' message
+bound_pattern = re.compile(r'^bound to\s+([0-9a-fA-F\.:]+)\s+--\s+renewal')
+
+# Dictionary to hold the assignments: key is (timestamp_text, ip), value is a set of clients
+assignments = {}
+
+with open(sys.argv[1], 'r') as f:
+    for line in f:
+        m = log_pattern.match(line)
+        if m:
+            month, day, time_str, host, msg = m.groups()
+            bm = bound_pattern.match(msg)
+            if bm:
+                ip = bm.group(1)
+                # Combine to form a full timestamp string using year 2000 as per constraints
+                ts_text = f"2000 {month} {day} {time_str}"
+                key = (ts_text, ip)
                 if key not in assignments:
                     assignments[key] = set()
                 assignments[key].add(host)
 
-    for key in sorted(assignments.keys()):
-        ts, ip = key
-        clients = assignments[key]
-        if len(clients) > 1:
-            clients_arr = json.dumps(sorted(list(clients)))
-            print(f"{ip} {ts} {clients_arr}")
-
-if __name__ == '__main__':
-    main()
+# Find cases where the same IP was assigned to 2 or more different clients at the exact same timestamp
+for (ts_text, ip), clients in assignments.items():
+    if len(clients) >= 2:
+        # Convert the timestamp to Unix time in seconds
+        ts = time.mktime(time.strptime(ts_text, "%Y %b %d %H:%M:%S"))
+        
+        # Format the clients array to be plain text, ensuring no spaces inside the array to satisfy
+        # 'separated by single spaces' for the overall line
+        clients_json = json.dumps(sorted(list(clients)), separators=(',', ':'))
+        
+        # Output format: assigned_ip timestamp clients
+        print(f"{ip} {ts} {clients_json}")
   precision=1.0000 recall=1.0000 f1=1.0000 TP=0 FP=0 FN=0 returned=0 must=0
   may_precision=1.0000 may_recall=1.0000 may_f1=1.0000 may_TP=0 may_FP=0 may_FN=0 may=0
   retries=0
-  input_tokens=20029 output_tokens=498
-  elapsed_seconds=74.02
+  input_tokens=20029 output_tokens=628
+  elapsed_seconds=87.78
 
 ID: multiline_19 | type: select | query: Are there any transactions (same client and transaction ID) where DISCOVER, OFFER, REQUEST, and ACK all occurred at exactly the same timestamp?
   requested output format=client,transaction_id,timestamp
   requested output data type=string,string,float
   command: import sys
 import re
-import time
 import gzip
+from collections import defaultdict
+from datetime import datetime
 
-def process():
+def run():
     if len(sys.argv) < 2:
         return
-    filepath = sys.argv[1]
-    
-    log_pattern = re.compile(
-        r'^(?P<mon>[A-Z][a-z]{2})\s+(?P<day>\d+)\s+(?P<time>\d{2}:\d{2}:\d{2})\s+(?P<host>\S+)\s+dhclient(?:\[(?P<pid>\d+)\])?:\s+(?P<msg>.*)$'
-    )
-    xid_pattern = re.compile(r'\(xid=(0x[0-9a-fA-F]+)\)')
+    file_path = sys.argv[1]
 
-    month_abbr = {
-        'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
-        'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12
-    }
+    opener = gzip.open if file_path.endswith('.gz') else open
 
-    host_pid_to_xid = {}
-    transactions = {}
+    line_re = re.compile(r'^([A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2})\s+(\S+)\s+(dhclient(?:\[(\d+)\])?):\s+(.*)$')
+    keyword_re = re.compile(r'^(DHCPDISCOVER|DHCPOFFER|DHCPREQUEST|DHCPACK)\b')
+    xid_re = re.compile(r'\(xid=(0x[a-fA-F0-9]+)\)')
 
-    open_func = gzip.open if filepath.endswith('.gz') else open
-    
-    with open_func(filepath, 'rt', encoding='utf-8', errors='replace') as f:
+    def parse_time(ts_str):
+        ts_str = re.sub(r'\s+', ' ', ts_str)
+        return datetime.strptime(f"2000 {ts_str}", "%Y %b %d %H:%M:%S").timestamp()
+
+    records = []
+
+    with opener(file_path, 'rt', encoding='utf-8', errors='replace') as f:
         for line in f:
-            m = log_pattern.match(line)
+            m = line_re.match(line)
             if not m:
                 continue
-                
-            mon, day, time_str, host, pid, msg = m.groups()
+            ts_str, host, _, pid, message = m.groups()
+            ts = parse_time(ts_str)
             
-            year = 2000
-            month = month_abbr.get(mon, 1)
-            day = int(day)
-            hh, mm, ss = map(int, time_str.split(':'))
-            t = (year, month, day, hh, mm, ss, 0, 0, -1)
-            ts = float(time.mktime(t))
-            
-            xid_m = xid_pattern.search(msg)
-            if xid_m:
-                tx_id = xid_m.group(1)
-                host_pid_to_xid[(host, pid)] = tx_id
-            else:
-                if (host, pid) in host_pid_to_xid:
-                    tx_id = host_pid_to_xid[(host, pid)]
-                else:
-                    tx_id = None
-                    
-            if not tx_id:
-                continue
-                
-            events_in_line = []
-            if 'DHCPDISCOVER' in msg: events_in_line.append('DISCOVER')
-            if 'DHCPOFFER' in msg: events_in_line.append('OFFER')
-            if 'DHCPREQUEST' in msg: events_in_line.append('REQUEST')
-            if 'DHCPACK' in msg: events_in_line.append('ACK')
-            
-            if not events_in_line:
-                continue
-                
-            key = (host, tx_id)
-            if key not in transactions:
-                transactions[key] = {'DISCOVER': set(), 'OFFER': set(), 'REQUEST': set(), 'ACK': set()}
-                
-            for ev in events_in_line:
-                transactions[key][ev].add(ts)
-                
+            pieces = re.split(r'(?=DHCPDISCOVER\b|DHCPOFFER\b|DHCPREQUEST\b|DHCPACK\b)', message)
+            for piece in pieces:
+                if not piece:
+                    continue
+                k_match = keyword_re.match(piece)
+                if k_match:
+                    ev_type = k_match.group(1).replace('DHCP', '')
+                    x_match = xid_re.search(piece)
+                    xid = x_match.group(1) if x_match else None
+                    records.append({
+                        'ts': ts,
+                        'client': host,
+                        'pid': pid,
+                        'type': ev_type,
+                        'xid': xid
+                    })
+
+    events_by_cts = defaultdict(list)
+    for r in records:
+        events_by_cts[(r['client'], r['ts'])].append(r)
+
     results = []
-    for (host, tx_id), evs in transactions.items():
-        common_ts = evs['DISCOVER'] & evs['OFFER'] & evs['REQUEST'] & evs['ACK']
-        for ts in common_ts:
-            results.append((host, tx_id, ts))
+
+    for (client, ts), evs in events_by_cts.items():
+        types_present = set(e['type'] for e in evs)
+        if {'DISCOVER', 'OFFER', 'REQUEST', 'ACK'}.issubset(types_present):
+            xids = set(e['xid'] for e in evs if e['xid'])
             
-    for host, tx_id, ts in results:
-        print(f"{host} {tx_id} {ts}")
+            pid_to_xids = defaultdict(set)
+            for e in evs:
+                if e['xid'] and e['pid']:
+                    pid_to_xids[e['pid']].add(e['xid'])
+            
+            for e in evs:
+                if not e['xid']:
+                    if e['pid'] and len(pid_to_xids[e['pid']]) == 1:
+                        e['xid'] = list(pid_to_xids[e['pid']])[0]
+                    elif len(xids) == 1:
+                        e['xid'] = list(xids)[0]
+                        
+            by_xid = defaultdict(set)
+            for e in evs:
+                if e['xid']:
+                    by_xid[e['xid']].add(e['type'])
+                    
+            for xid, types in by_xid.items():
+                if {'DISCOVER', 'OFFER', 'REQUEST', 'ACK'}.issubset(types):
+                    results.append((client, xid, ts))
+
+    for client, xid, ts in results:
+        print(f"{client} {xid} {ts}")
 
 if __name__ == '__main__':
-    process()
-  precision=0.9587 recall=1.0000 f1=0.9789 TP=743 FP=32 FN=0 returned=775 must=743
-  may_precision=0.9587 may_recall=1.0000 may_f1=0.9789 may_TP=743 may_FP=32 may_FN=0 may=743
+    run()
+  precision=0.9970 recall=0.9071 f1=0.9500 TP=674 FP=2 FN=69 returned=676 must=743
+  may_precision=0.9970 may_recall=0.9071 may_f1=0.9500 may_TP=674 may_FP=2 may_FN=69 may=743
   retries=0
-  input_tokens=20035 output_tokens=986
-  elapsed_seconds=126.6
+  input_tokens=20035 output_tokens=1030
+  elapsed_seconds=125.12
 
 ID: multiline_20 | type: select | query: Associate each assigned IP with the MAC address reported for that client/process stream, and return the timestamp, client MAC, and assigned IP.
   requested output format=timestamp,client_mac,assigned_ip
   requested output data type=float,string,string
   command: import sys
 import re
-import datetime
-import gzip
-
-month_map = {
-    'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
-    'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12
-}
-
-def to_unix(month_str, day_str, time_str):
-    m = month_map.get(month_str[:3], 1)
-    d = int(day_str)
-    H, M, S = map(int, time_str.split(':'))
-    dt = datetime.datetime(2000, m, d, H, M, S)
-    return dt.timestamp()
-
-def main():
-    if len(sys.argv) < 2:
-        return
-    
-    file_path = sys.argv[1]
-    open_func = gzip.open if file_path.endswith('.gz') else open
-    
-    log_pattern = re.compile(
-        r'^(?P<month>[A-Z][a-z]{2})\s+'
-        r'(?P<day>\d+)\s+'
-        r'(?P<time>\d{2}:\d{2}:\d{2})\s+'
-        r'(?P<host>\S+)\s+'
-        r'(?P<proc>dhclient(?:\[\d+\])?):\s*'
-        r'(?P<msg>.*)$'
-    )
-    
-    mac_pattern = re.compile(r'\b(?:Listening|Sending) on\s+[^/]+/[^/]+/([0-9a-fA-F:]+)')
-    bound_pattern = re.compile(r'\bbound to\s+([0-9a-fA-F\.:]+)')
-    trying_pattern = re.compile(r'\bTrying recorded lease\s+([0-9a-fA-F\.:]+)')
-    bound_no_ip_pattern = re.compile(r'\bbound:\s+renewal')
-    
-    mac_map = {}
-    trying_map = {}
-    
-    with open_func(file_path, 'rt', encoding='utf-8', errors='ignore') as f:
-        for line in f:
-            match = log_pattern.match(line)
-            if not match:
-                continue
-                
-            host = match.group('host')
-            proc = match.group('proc')
-            msg = match.group('msg')
-            
-            key = (host, proc)
-            
-            m_mac = mac_pattern.search(msg)
-            if m_mac:
-                mac_map[key] = m_mac.group(1)
-                continue
-                
-            m_trying = trying_pattern.search(msg)
-            if m_trying:
-                trying_map[key] = m_trying.group(1)
-                continue
-                
-            m_bound = bound_pattern.search(msg)
-            if m_bound:
-                assigned_ip = m_bound.group(1)
-                client_mac = mac_map.get(key)
-                if client_mac and assigned_ip:
-                    ts = to_unix(match.group('month'), match.group('day'), match.group('time'))
-                    print(f"{ts} {client_mac} {assigned_ip}")
-                continue
-                
-            m_bound_no_ip = bound_no_ip_pattern.search(msg)
-            if m_bound_no_ip:
-                assigned_ip = trying_map.get(key)
-                client_mac = mac_map.get(key)
-                if assigned_ip and client_mac:
-                    ts = to_unix(match.group('month'), match.group('day'), match.group('time'))
-                    print(f"{ts} {client_mac} {assigned_ip}")
-                continue
-
-if __name__ == '__main__':
-    main()
-  precision=0.7349 recall=0.9949 f1=0.8453 TP=14530 FP=5242 FN=75 returned=19772 must=14605
-  may_precision=0.7349 may_recall=0.9949 may_f1=0.8453 may_TP=14530 may_FP=5242 may_FN=75 may=14605
-  retries=0
-  input_tokens=20038 output_tokens=1025
-  elapsed_seconds=123.01
-
-ID: multiline_21 | type: select | query: Find DHCP renewals where a DHCPREQUEST occurs within 25% of the stated renewal time after the lease was bound in the same host/process stream. Return the hostname, assigned IP, and elapsed seconds from the bound event to the REQUEST.
-  requested output format=hostname,assigned_ip,lease_renewal_time_seconds
-  requested output data type=string,string,float
-  command: import sys
-import re
-from datetime import datetime
+import time
 import calendar
 
 def main():
     if len(sys.argv) < 2:
         return
     
-    log_pattern = re.compile(
-        r"^(?P<month>[A-Z][a-z]{2})\s+"
-        r"(?P<day>\d+)\s+"
-        r"(?P<time>\d{2}:\d{2}:\d{2})\s+"
-        r"(?P<host>\S+)\s+"
-        r"(?P<proc>dhclient(?:\[\d+\])?):\s+"
-        r"(?P<msg>.*)$"
-    )
-    bound_pattern = re.compile(r"\bbound to (?P<ip>\S+) -- renewal in (?P<renewal>\d+) seconds")
-    request_pattern = re.compile(r"\bDHCPREQUEST on \b")
+    log_file = sys.argv[1]
     
-    streams = {}
+    line_re = re.compile(r'^([A-Z][a-z]{2})\s+(\d+)\s+(\d{2}:\d{2}:\d{2})\s+(\S+)\s+([^:]+):\s+(.*)$')
+    mac_re = re.compile(r'(?:Listening|Sending) on\s+[^/]+/[^/]+/([0-9a-fA-F:]{11,17})')
+    bound_re = re.compile(r'bound to (\S+)\s+--\s+renewal')
+    
+    month_map = {v: k for k,v in enumerate(calendar.month_abbr) if v}
+    mac_map = {}
     
     try:
-        with open(sys.argv[1], 'r') as f:
+        with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
             for line in f:
                 line = line.strip()
-                m = log_pattern.match(line)
+                if not line:
+                    continue
+                
+                m = line_re.match(line)
                 if not m:
                     continue
                 
-                host = m.group('host')
-                proc = m.group('proc')
-                msg = m.group('msg')
-                stream_key = (host, proc)
+                month_str, day_str, time_str, host, process, msg = m.groups()
+                stream_key = (host, process)
                 
-                dt_str = f"2000 {m.group('month')} {m.group('day')} {m.group('time')}"
-                try:
-                    dt = datetime.strptime(dt_str, "%Y %b %d %H:%M:%S")
-                    ts = float(calendar.timegm(dt.timetuple()))
-                except ValueError:
-                    continue
+                mac_m = mac_re.search(msg)
+                if mac_m:
+                    mac_map[stream_key] = mac_m.group(1)
                 
-                bm = bound_pattern.search(msg)
-                if bm:
-                    streams[stream_key] = {
-                        'ip': bm.group('ip'),
-                        'renewal': int(bm.group('renewal')),
-                        'ts': ts
-                    }
-                    continue
-                
-                if request_pattern.search(msg):
-                    if stream_key in streams:
-                        state = streams[stream_key]
-                        elapsed = ts - state['ts']
-                        if 0 <= elapsed <= 0.25 * state['renewal']:
-                            print(f"{host} {state['ip']} {elapsed}")
-    except FileNotFoundError:
+                bound_m = bound_re.search(msg)
+                if bound_m:
+                    assigned_ip = bound_m.group(1)
+                    mac = mac_map.get(stream_key)
+                    if mac:
+                        month = month_map.get(month_str, 1)
+                        day = int(day_str)
+                        H, M, S = map(int, time_str.split(':'))
+                        t_tuple = (2000, month, day, H, M, S, -1, -1, -1)
+                        try:
+                            ts = float(time.mktime(t_tuple))
+                            print(f"{ts} {mac} {assigned_ip}")
+                        except OverflowError:
+                            pass
+    except Exception:
         pass
 
 if __name__ == '__main__':
     main()
-  precision=0.9998 recall=1.0000 f1=0.9999 TP=4356 FP=1 FN=0 returned=4357 must=4356
-  may_precision=0.9998 may_recall=1.0000 may_f1=0.9999 may_TP=4356 may_FP=1 may_FN=0 may=4356
+  precision=0.7343 recall=0.9951 f1=0.8451 TP=14534 FP=5258 FN=71 returned=19792 must=14605
+  may_precision=0.7343 may_recall=0.9951 may_f1=0.8451 may_TP=14534 may_FP=5258 may_FN=71 may=14605
   retries=0
-  input_tokens=20073 output_tokens=643
-  elapsed_seconds=89.12
+  input_tokens=20038 output_tokens=617
+  elapsed_seconds=81.97
+
+ID: multiline_21 | type: select | query: Find DHCP renewals where a DHCPREQUEST occurs within 25% of the stated renewal time after the lease was bound in the same host/process stream. Return the hostname, assigned IP, and elapsed seconds from the bound event to the REQUEST.
+  requested output format=hostname,assigned_ip,lease_renewal_time_seconds
+  requested output data type=string,string,float
+  command: import sys
+import re
+import gzip
+from datetime import datetime
+
+def parse_time(month, day, time_str):
+    t_str = f"2000 {month} {day} {time_str}"
+    return datetime.strptime(t_str, "%Y %b %d %H:%M:%S").timestamp()
+
+def main():
+    if len(sys.argv) < 2:
+        return
+    
+    line_re = re.compile(r'^(?:<\d+>)?([A-Z][a-z]{2})\s+(\d+)\s+(\d{2}:\d{2}:\d{2})\s+(\S+)\s+(.*)')
+    base_re = re.compile(r'^([a-zA-Z0-9_-]+)(?:\[(\d+)\])?:\s+(.*)')
+    nested_re = re.compile(r'^([A-Z][a-z]{2})\s+(\d+)\s+(\d{2}:\d{2}:\d{2})\s+([a-zA-Z0-9_-]+)(?:\[(\d+)\])?:\s+(.*)')
+    bound_re = re.compile(r'bound to ([0-9a-fA-F:\.]+)\s+--\s+renewal in (\d+)\s+seconds')
+    
+    state = {}
+    
+    open_func = gzip.open if sys.argv[1].endswith('.gz') else open
+    with open_func(sys.argv[1], 'rt', encoding='utf-8', errors='ignore') as f:
+        for line in f:
+            line = line.strip()
+            m = line_re.match(line)
+            if not m:
+                continue
+                
+            base_month, base_day, base_time, host, rest = m.groups()
+            base_ts = parse_time(base_month, base_day, base_time)
+            
+            parts = re.split(r'<\d+>', rest)
+            
+            for i, part in enumerate(parts):
+                part = part.strip()
+                if not part:
+                    continue
+                    
+                if i == 0:
+                    m_base = base_re.match(part)
+                    if m_base:
+                        proc_name, pid, msg = m_base.groups()
+                        process_msg(host, proc_name, pid, base_ts, msg, state, bound_re)
+                else:
+                    m_nested = nested_re.match(part)
+                    if m_nested:
+                        n_month, n_day, n_time, proc_name, pid, msg = m_nested.groups()
+                        ts = parse_time(n_month, n_day, n_time)
+                        process_msg(host, proc_name, pid, ts, msg, state, bound_re)
+
+def process_msg(host, proc_name, pid, ts, msg, state, bound_re):
+    pid = pid if pid else ""
+    key = (host, proc_name, pid)
+    
+    b_m = bound_re.match(msg)
+    if b_m:
+        assigned_ip = b_m.group(1)
+        renewal_time = float(b_m.group(2))
+        state[key] = (ts, assigned_ip, renewal_time)
+        return
+        
+    if msg.startswith('DHCPREQUEST'):
+        if key in state:
+            bound_ts, assigned_ip, renewal_time = state[key]
+            elapsed = ts - bound_ts
+            if 0 <= elapsed <= 0.25 * renewal_time:
+                print(f"{host} {assigned_ip} {float(elapsed)}")
+                del state[key]
+
+if __name__ == '__main__':
+    main()
+  precision=0.9910 recall=0.5048 f1=0.6689 TP=2199 FP=20 FN=2157 returned=2219 must=4356
+  may_precision=0.9910 may_recall=0.5048 may_f1=0.6689 may_TP=2199 may_FP=20 may_FN=2157 may=4356
+  retries=1
+  input_tokens=40179 output_tokens=1827
+  elapsed_seconds=289.4
 
 # Macro Averages (where/select queries)
-# precision=0.8556 recall=0.8660 f1=0.8586
-# may_precision=0.8556 may_recall=0.8311 may_f1=0.8314
-# retries_total=4 retries_avg=0.20
-# total_input_tokens=480551 total_output_tokens=21185
-# total_elapsed=3211.62s avg_elapsed=160.58s
+# precision=0.9110 recall=0.8851 f1=0.8625
+# may_precision=0.9110 may_recall=0.8573 may_f1=0.8406
+# retries_total=10 retries_avg=0.48
+# total_input_tokens=621189 total_output_tokens=30544
+# total_elapsed=4383.66s avg_elapsed=208.75s
 # Worst 5 queries by f1
-# 1. multiline_13 | type: select | f1=0.0000 | query: Identify invalid DHCP cycle transitions by hostname and transaction ID. If a DHCP message lacks a transaction ID, infer it from the latest transaction ID in the same process stream. Valid repeated cycles are DHCPDISCOVER -> DHCPOFFER -> DHCPREQUEST -> DHCPACK and DHCPREQUEST -> DHCPACK. Treat incomplete trailing sequences as allowed; only explicit bad transitions are violations.
-# 2. multiline_17 | type: select | f1=0.0000 | error: __EVAL_ERROR__: timeout expired
-# 3. multiline_5 | type: select | f1=0.6353 | query: Considering only client/process streams that contain DHCPDISCOVER, DHCPOFFER, DHCPREQUEST, and DHCPACK, return for each client the average elapsed seconds between the DISCOVER and ACK.
-# 4. multiline_11 | type: select | f1=0.8000 | query: Return the 1-indexed line number and hostname for each DHCPOFFER line where no DHCPDISCOVER from the same hostname/process stream occurred in the previous 30 seconds. If a DHCP message lacks a transaction ID, infer it from the latest transaction ID in the same process stream.
-# 5. multiline_20 | type: select | f1=0.8453 | query: Associate each assigned IP with the MAC address reported for that client/process stream, and return the timestamp, client MAC, and assigned IP.
+# 1. multiline_11 | type: select | f1=0.2105 | query: Return the 1-indexed line number and hostname for each DHCPOFFER line where no DHCPDISCOVER from the same hostname/process stream occurred in the previous 30 seconds. If a DHCP message lacks a transaction ID, infer it from the latest transaction ID in the same process stream.
+# 2. multiline_13 | type: select | f1=0.3235 | query: Identify invalid DHCP cycle transitions by hostname and transaction ID. If a DHCP message lacks a transaction ID, infer it from the latest transaction ID in the same process stream. Valid repeated cycles are DHCPDISCOVER -> DHCPOFFER -> DHCPREQUEST -> DHCPACK and DHCPREQUEST -> DHCPACK. Treat incomplete trailing sequences as allowed; only explicit bad transitions are violations.
+# 3. multiline_5 | type: select | f1=0.6638 | query: Considering only client/process streams that contain DHCPDISCOVER, DHCPOFFER, DHCPREQUEST, and DHCPACK, return for each client the average elapsed seconds between the DISCOVER and ACK.
+# 4. multiline_21 | type: select | f1=0.6689 | query: Find DHCP renewals where a DHCPREQUEST occurs within 25% of the stated renewal time after the lease was bound in the same host/process stream. Return the hostname, assigned IP, and elapsed seconds from the bound event to the REQUEST.
+# 5. multiline_1 | type: select | f1=0.7975 | query: Find transactions where time from DHCPREQUEST to DHCPACK exceeds 5 seconds. Return a list of pairs of transaction ids and duration.
