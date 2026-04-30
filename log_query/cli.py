@@ -98,8 +98,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--vertex-ai", action="store_true", help="Use Vertex AI instead of standalone Gemini API")
     parser.add_argument(
         "--project",
-        default="reds-evan-project",
-        help="GCP project for Vertex AI (default: reds-evan-project)",
+        default=os.environ.get("VERTEX_PROJECT"),
+        help="GCP project for Vertex AI (env: VERTEX_PROJECT)",
     )
     parser.add_argument(
         "--location",
