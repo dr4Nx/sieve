@@ -147,7 +147,7 @@ paper.
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--experiment` | - | **Required** — experiment name from the table above |
+| `--experiment` | - | **Required**. Experiment name from the table above |
 | `--datasets` | `audit_simple puppet_simple` | One or more of `<logtype>_<simple\|complex>` |
 | `--model` | `gemini-2.5-flash` | Single model for non-comparison experiments |
 | `--models` | all | Override model list for `model-compare` / `full-matrix` |

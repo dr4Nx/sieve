@@ -514,7 +514,7 @@ def _run_single_query_impl(
                     break
                 # Exponential backoff: 5, 10, 20, 40, 80, 160 seconds
                 wait = 5 * (2 ** attempt)
-                log.warn(f"{prefix}Transient API error (attempt {attempt + 1}/6): {err_str[:120]} — backing off {wait}s")
+                log.warn(f"{prefix}Transient API error (attempt {attempt + 1}/6): {err_str[:120]}; backing off {wait}s")
                 _t_mod.sleep(wait)
         if api_error is not None or response is None:
             error_msg = f"Gemini API call failed after retries: {api_error}"
