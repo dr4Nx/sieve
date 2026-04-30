@@ -56,9 +56,14 @@ PYTHON_DANGEROUS_SUBSTRINGS = [
     "subprocess.",
 ]
 
-PYTHON_WRITE_MODE_RE = re.compile(r"\bopen\s*\([^)]*,\s*['\"][^'\"]*[wax+]")
-PYTHON_WRITE_MODE_KW_RE = re.compile(r"\bopen\s*\([^)]*mode\s*=\s*['\"][^'\"]*[wax+]")
-PYTHON_PATH_OPEN_RE = re.compile(r"\.open\s*\([^)]*['\"][^'\"]*[wax+]")
+# A real Python file mode is 1-4 chars from {r,w,x,a,b,t,U,+} and contains at
+# least one write/append/exclusive flag. This is intentionally narrow so
+# that quoted keyword strings like 'replace' or 'utf-8' do not false-match.
+_PY_MODE_TOKEN = r"['\"][rwxabtU+]*[wax+][rwxabtU+]*['\"]"
+PYTHON_WRITE_MODE_RE = re.compile(r"\bopen\s*\(\s*[^,()]+,\s*" + _PY_MODE_TOKEN)
+PYTHON_WRITE_MODE_KW_RE = re.compile(r"\bopen\s*\([^)]*mode\s*=\s*" + _PY_MODE_TOKEN)
+# Path("/x").open('w') has the mode as the first positional argument.
+PYTHON_PATH_OPEN_RE = re.compile(r"\.open\s*\(\s*" + _PY_MODE_TOKEN)
 
 REDIRECT_RE = re.compile(r"(?:^|\s)(?:\d?>>|&>>|&>|>>|>)")
 HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z0-9_]+)\1")
