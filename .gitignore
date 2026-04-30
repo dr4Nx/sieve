@@ -15,6 +15,10 @@ extracted_templates/
 results/*
 !results/matryoshka_comparison/
 !results/generated_code/
+!results/openai_gpt54/
+!results/prompt_ablation/
+!results/language_compare/
+!results/human_baseline/
 *.log
 
 # Decompressed log files (shipped as .gz in data/logs/)
