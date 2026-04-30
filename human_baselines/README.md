@@ -49,17 +49,3 @@ python3 experiments.py --experiment human-baseline \
 
 The runner writes one report per dataset under
 `eval/experiments/human-baseline/<timestamp>/`.
-
-## What the scripts do not handle
-
-These reference scripts do not attempt to handle:
-
-- Word boundaries (`grep "3.0.1"` matches `3.0.10`).
-- Year boundaries in syslog-style timestamps.
-- Transaction ID inference across process restarts.
-- Time zone normalization.
-- Multi-permission audit denials counted as one event.
-- Numeric output formatting (e.g. float precision).
-
-For some DHCP queries (`vague_*`, `numerical_*`) there is no straightforward
-grep-style approach; the corresponding scripts return no matches.
