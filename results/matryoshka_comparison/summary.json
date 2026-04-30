@@ -1,0 +1,71 @@
+{
+  "seed": 27,
+  "sample_size_per_log": 5,
+  "selected_logs": [
+    "audit",
+    "cron",
+    "dhcp",
+    "puppet",
+    "sshd"
+  ],
+  "logs": {
+    "audit": {
+      "query_ids": [
+        "audit_query_2",
+        "audit_query_3",
+        "audit_query_4",
+        "audit_query_6",
+        "audit_query_8"
+      ],
+      "macro_precision": 0.9998862505332007,
+      "macro_recall": 0.9955355937673792
+    },
+    "cron": {
+      "query_ids": [
+        "cron_query_1",
+        "cron_query_3",
+        "cron_query_5",
+        "cron_query_6",
+        "cron_query_9"
+      ],
+      "macro_precision": 1.0,
+      "macro_recall": 1.0
+    },
+    "dhcp": {
+      "query_ids": [
+        "dhcp_query_1",
+        "dhcp_query_3",
+        "dhcp_query_5",
+        "dhcp_query_6",
+        "dhcp_query_9"
+      ],
+      "macro_precision": 1.0,
+      "macro_recall": 1.0
+    },
+    "puppet": {
+      "query_ids": [
+        "puppet_query_1",
+        "puppet_query_2",
+        "puppet_query_3",
+        "puppet_query_5",
+        "puppet_query_9"
+      ],
+      "macro_precision": 1.0,
+      "macro_recall": 0.9959595959595958
+    },
+    "sshd": {
+      "query_ids": [
+        "sshd_query_3",
+        "sshd_query_4",
+        "sshd_query_5",
+        "sshd_query_6",
+        "sshd_query_8"
+      ],
+      "macro_precision": 0.999002493765586,
+      "macro_recall": 0.9989449886963074
+    }
+  },
+  "overall_macro_precision": 0.9997777488597574,
+  "overall_macro_recall": 0.9980880356846565,
+  "parsed_from_raw_logs": true
+}

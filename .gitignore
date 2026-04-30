@@ -12,7 +12,7 @@ eval/
 output/
 templates/
 extracted_templates/
-results/
+results/*
 !results/matryoshka_comparison/
 *.log
 
