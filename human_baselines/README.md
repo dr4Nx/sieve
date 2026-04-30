@@ -20,17 +20,6 @@ human_baselines/
   dhcp_complex/      21 .py
 ```
 
-## Conventions
-
-- Where queries (line filters) use bash one-liners with `grep` or `awk`.
-- Select queries (extraction) use small Python with `re` and standard
-  collections.
-- Complex multi-line queries use Python with simple transaction tracking; they
-  do not attempt to handle every edge case (time zones, ID inference, rolling
-  windows).
-- Each script takes the log file path as its only argument and prints results
-  to stdout.
-
 ## Running a single script
 
 ```bash
